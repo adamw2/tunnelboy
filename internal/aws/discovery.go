@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/opensearch"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/yourorg/tunnelboy/internal/config"
+	"github.com/adamw2/tunnelboy/internal/config"
 )
 
 // Discovery handles AWS resource discovery

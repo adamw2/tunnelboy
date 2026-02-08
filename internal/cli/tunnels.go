@@ -8,7 +8,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/yourorg/tunnelboy/internal/tui"
+	"github.com/adamw2/tunnelboy/internal/tui"
 )
 
 // Note: This is a simplified version. In a full implementation,

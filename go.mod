@@ -1,4 +1,4 @@
-module github.com/yourorg/tunnelboy
+module github.com/adamw2/tunnelboy
 
 go 1.24.0
 

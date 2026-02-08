@@ -9,9 +9,9 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/yourorg/tunnelboy/internal/aws"
-	"github.com/yourorg/tunnelboy/internal/config"
-	"github.com/yourorg/tunnelboy/internal/tui"
+	"github.com/adamw2/tunnelboy/internal/aws"
+	"github.com/adamw2/tunnelboy/internal/config"
+	"github.com/adamw2/tunnelboy/internal/tui"
 )
 
 var listCmd = &cobra.Command{
