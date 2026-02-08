@@ -1,0 +1,89 @@
+image: golang:1.22
+
+definitions:
+  caches:
+    go-mod: ~/go/pkg/mod
+
+  steps:
+    - step: &test
+        name: Test
+        caches:
+          - go-mod
+        script:
+          - go mod download
+          - go test -v ./...
+
+    - step: &lint
+        name: Lint
+        caches:
+          - go-mod
+        script:
+          - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          - golangci-lint run
+
+    - step: &build-and-release
+        name: Build and Release
+        caches:
+          - go-mod
+        script:
+          # Install dependencies
+          - apt-get update && apt-get install -y curl git
+
+          # Build version info
+          - VERSION=${BITBUCKET_TAG#v}
+          - COMMIT=${BITBUCKET_COMMIT:0:7}
+          - DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          - LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
+
+          # Build for macOS Intel
+          - echo "Building for macOS Intel..."
+          - GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o tunnelboy ./cmd/tunnelboy
+          - tar -czvf tunnelboy_darwin_amd64.tar.gz tunnelboy
+          - rm tunnelboy
+
+          # Build for macOS Apple Silicon
+          - echo "Building for macOS Apple Silicon..."
+          - GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o tunnelboy ./cmd/tunnelboy
+          - tar -czvf tunnelboy_darwin_arm64.tar.gz tunnelboy
+          - rm tunnelboy
+
+          # Generate checksums
+          - sha256sum tunnelboy_darwin_*.tar.gz > checksums.txt
+          - cat checksums.txt
+
+          # Upload to Bitbucket Downloads
+          - pipe: atlassian/bitbucket-upload-file:0.7.1
+            variables:
+              BITBUCKET_USERNAME: $BITBUCKET_USERNAME
+              BITBUCKET_APP_PASSWORD: $BITBUCKET_APP_PASSWORD
+              FILENAME: "tunnelboy_darwin_amd64.tar.gz"
+
+          - pipe: atlassian/bitbucket-upload-file:0.7.1
+            variables:
+              BITBUCKET_USERNAME: $BITBUCKET_USERNAME
+              BITBUCKET_APP_PASSWORD: $BITBUCKET_APP_PASSWORD
+              FILENAME: "tunnelboy_darwin_arm64.tar.gz"
+
+          - pipe: atlassian/bitbucket-upload-file:0.7.1
+            variables:
+              BITBUCKET_USERNAME: $BITBUCKET_USERNAME
+              BITBUCKET_APP_PASSWORD: $BITBUCKET_APP_PASSWORD
+              FILENAME: "checksums.txt"
+
+          # Update Homebrew formula
+          - chmod +x ./scripts/update-homebrew-formula.sh
+          - ./scripts/update-homebrew-formula.sh
+
+pipelines:
+  default:
+    - step: *test
+
+  pull-requests:
+    '**':
+      - step: *test
+      - step: *lint
+
+  tags:
+    'v*':
+      - step: *test
+      - step: *build-and-release

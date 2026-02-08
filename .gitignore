@@ -1,0 +1,45 @@
+# Binaries
+bin/
+dist/
+tunnelboy
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Config files (keep example)
+.tunnelboy.yaml
+tunnelboy.yaml
+
+# Build artifacts
+*.tar.gz
+checksums.txt
+
+# Go workspace
+go.work
+go.work.sum

@@ -1,0 +1,121 @@
+# TunnelBoy Configuration
+# Save this as ~/.tunnelboy.yaml
+
+# Default AWS profile (fallback if AWS_PROFILE is not set)
+# Priority: 1. --profile CLI flag, 2. AWS_PROFILE env var, 3. this default_profile
+default_profile: default
+
+# Jump host discovery configuration
+jump_hosts:
+  # Option 1: Name patterns (glob-style, case-insensitive)
+  # TunnelBoy will search for EC2 instances and ECS tasks matching these patterns
+  patterns:
+    - "*bastion*"
+    - "*jump*"
+    - "*gateway*"
+  
+  # Option 2: AWS resource tags
+  # Find jump hosts by tag key/value pairs
+  tags:
+    - key: "role"
+      value: "bastion"
+    - key: "tunnelboy:jump-host"
+      value: "true"
+  
+  # Option 3: Explicit EC2 instances (highest priority)
+  # Specify exact instance IDs
+  instances:
+    - i-0abc123def456789
+    - i-0xyz789abc123def
+  
+  # Option 4: Explicit ECS tasks
+  # Specify ECS cluster and service
+  ecs:
+    - cluster: production-cluster
+      service: bastion-service
+    - cluster: staging-cluster
+      service: jump-host-service
+
+# Saved connection presets
+# Use with: tunnelboy connect <preset-name>
+connections:
+  # RDS connection examples
+  prod-analytics:
+    type: rds
+    identifier: prod-analytics-postgres
+    db_user: readonly
+    aws_profile: production  # Optional: validates you're on the correct profile
+    local_port: 5432
+    via: i-0abc123def456789  # Optional: pin to specific jump host
+
+  staging-mysql:
+    type: rds
+    identifier: staging-api-mysql
+    db_user: app_service
+    aws_profile: staging  # Optional: validates you're on the staging profile
+    local_port: 3306
+    # No 'via' specified - will auto-discover jump host
+    
+  # Connection without profile validation (works with any active profile)
+  dev-db:
+    type: rds
+    identifier: dev-database
+    db_user: dev_user
+    local_port: 5433
+    # No aws_profile - uses whatever profile you're currently using
+
+  # OpenSearch connection example (with automatic SigV4 signing proxy)
+  prod-logs:
+    type: opensearch
+    domain: prod-logs-domain
+    local_port: 9250  # Signing proxy listens here; access dashboards at http://localhost:9250/_dashboards
+    via: i-0abc123def456789
+
+  staging-search:
+    type: opensearch
+    domain: staging-search-domain
+    local_port: 9251  # Different port to avoid conflicts
+
+  # EC2 interactive shell (default mode, SSM-enabled instance)
+  app-server:
+    type: ec2
+    instance: i-0directssm12345
+    connection_type: shell  # Default: opens interactive shell
+    # No remote_port needed for shell mode
+
+  # EC2 port forwarding (opt-in)
+  legacy-db-server:
+    type: ec2
+    instance: i-0legacy123456789
+    connection_type: port_forward  # Explicitly use port forwarding
+    remote_port: 3306
+    local_port: 3307
+    via: i-0abc123def456789  # Must specify jump host
+
+  # EC2 by name pattern (matches multiple instances)
+  # Example: "ecrion render 01", "ecrion render 02", etc.
+  render-server:
+    type: ec2
+    name_pattern: "ecrion render"  # Matches any instance with this in the name
+    connection_type: port_forward   # Use port forwarding instead of shell
+    remote_port: 50100              # Custom port
+    local_port: 50100
+    aws_profile: production
+
+  # EC2 shell by name pattern (interactive selection if multiple matches)
+  bastion-shell:
+    type: ec2
+    name_pattern: "bastion"
+    connection_type: shell  # Open interactive shell on selected bastion
+
+  # MongoDB/DocumentDB example
+  prod-mongo:
+    type: rds  # DocumentDB is treated as RDS
+    identifier: prod-documentdb
+    db_user: app_reader
+    local_port: 27017
+
+# Example usage:
+# tunnelboy connect prod-analytics
+# tunnelboy connect staging-mysql
+# tunnelboy connect prod-logs
