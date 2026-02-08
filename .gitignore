@@ -1,7 +1,7 @@
 # Binaries
 bin/
 dist/
-tunnelboy
+/tunnelboy
 *.exe
 *.dll
 *.so
