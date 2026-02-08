@@ -41,7 +41,7 @@ brew install --cask session-manager-plugin
 
 ```bash
 # Via Homebrew
-brew tap yourorg/tunnelboy https://bitbucket.org/yourorg/homebrew-tunnelboy.git
+brew tap adamw2/tunnelboy
 brew install tunnelboy
 
 # Verify installation

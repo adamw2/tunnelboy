@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # Needed for creating releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build version info
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+          echo "COMMIT=${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+
+      - name: Build for macOS Intel
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags "-s -w -X main.version=${{ env.VERSION }} -X main.commit=${{ env.COMMIT }} -X main.date=${{ env.DATE }}" -o tunnelboy ./cmd/tunnelboy
+          tar -czvf tunnelboy_darwin_amd64.tar.gz tunnelboy
+          rm tunnelboy
+
+      - name: Build for macOS Apple Silicon
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags "-s -w -X main.version=${{ env.VERSION }} -X main.commit=${{ env.COMMIT }} -X main.date=${{ env.DATE }}" -o tunnelboy ./cmd/tunnelboy
+          tar -czvf tunnelboy_darwin_arm64.tar.gz tunnelboy
+          rm tunnelboy
+
+      - name: Generate checksums
+        run: |
+          shasum -a 256 tunnelboy_darwin_*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            tunnelboy_darwin_amd64.tar.gz
+            tunnelboy_darwin_arm64.tar.gz
+            checksums.txt
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        env:
+          GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          chmod +x ./scripts/update-homebrew-formula-github.sh
+          ./scripts/update-homebrew-formula-github.sh
