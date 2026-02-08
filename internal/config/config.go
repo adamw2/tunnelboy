@@ -36,6 +36,7 @@ type ECSTarget struct {
 // Connection represents a saved connection preset
 type Connection struct {
 	Type           string `mapstructure:"type"`            // rds, opensearch, ec2
+	Description    string `mapstructure:"description"`     // Custom description for shell completion
 	Identifier     string `mapstructure:"identifier"`      // RDS identifier or OpenSearch domain
 	Instance       string `mapstructure:"instance"`        // EC2 instance ID
 	NamePattern    string `mapstructure:"name_pattern"`    // EC2 name pattern (alternative to instance)

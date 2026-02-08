@@ -972,12 +972,25 @@ func completeConnectionPresets(cmd *cobra.Command, args []string, toComplete str
 
 	var completions []string
 	for name, conn := range cfg.Connections {
-		desc := fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.Identifier)
-		if conn.Type == "opensearch" {
-			desc = fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.Domain)
-		} else if conn.Type == "ec2" {
-			desc = fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.Instance)
+		var desc string
+		
+		// Use custom description if provided
+		if conn.Description != "" {
+			desc = fmt.Sprintf("%s\t%s", name, conn.Description)
+		} else {
+			// Auto-generate description from connection details
+			desc = fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.Identifier)
+			if conn.Type == "opensearch" {
+				desc = fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.Domain)
+			} else if conn.Type == "ec2" {
+				if conn.NamePattern != "" {
+					desc = fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.NamePattern)
+				} else {
+					desc = fmt.Sprintf("%s\t%s: %s", name, conn.Type, conn.Instance)
+				}
+			}
 		}
+		
 		completions = append(completions, desc)
 	}
 

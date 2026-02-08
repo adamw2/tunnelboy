@@ -43,9 +43,13 @@ func (pm *ProfileManager) LoadProfile(ctx context.Context, profileName string) e
 		os.Setenv("AWS_PROFILE", profileName)
 	}
 	
-	// Check if we're inside Granted --exec
-	if os.Getenv("GRANTED_EXEC") == "true" {
-		// Just load default config - environment credentials are already set by Granted
+	// Check if we have environment credentials (from Granted's assume or auto-switch)
+	hasEnvCreds := os.Getenv("AWS_ACCESS_KEY_ID") != "" && os.Getenv("AWS_SECRET_ACCESS_KEY") != ""
+	
+	if hasEnvCreds {
+		// Environment credentials exist (either from manual `assume` or GRANTED_EXEC)
+		// Use default config loading which will pick up environment variables
+		// Don't use WithSharedConfigProfile as it tries to load SSO tokens
 		cfg, err := config.LoadDefaultConfig(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to load AWS config: %w", err)
@@ -55,7 +59,7 @@ func (pm *ProfileManager) LoadProfile(ctx context.Context, profileName string) e
 		return nil
 	}
 	
-	// Standard profile loading for non-Granted workflows
+	// No environment credentials - use standard profile loading with SSO
 	if profileName != "" {
 		opts = append(opts, config.WithSharedConfigProfile(profileName))
 	}

@@ -96,6 +96,7 @@ connections:
   # Example: "ecrion render 01", "ecrion render 02", etc.
   render-server:
     type: ec2
+    description: "Connect to Ecrion Render servers"  # Custom description for shell completion
     name_pattern: "ecrion render"  # Matches any instance with this in the name
     connection_type: port_forward   # Use port forwarding instead of shell
     remote_port: 50100              # Custom port
@@ -105,6 +106,7 @@ connections:
   # EC2 shell by name pattern (interactive selection if multiple matches)
   bastion-shell:
     type: ec2
+    description: "Open shell on bastion host"  # Optional: custom description
     name_pattern: "bastion"
     connection_type: shell  # Open interactive shell on selected bastion
 

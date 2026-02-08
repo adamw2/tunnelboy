@@ -249,11 +249,28 @@ connections:
 
   render-server:
     type: ec2
+    description: "Connect to Ecrion Render servers"  # Custom completion description
     name_pattern: "ecrion render"
     connection_type: port_forward  # Use port forwarding
     remote_port: 50100
     local_port: 50100
 ```
+
+**Connection Descriptions:**
+
+Add a `description` field to customize what appears in shell completion:
+
+```yaml
+ecrion-tunnel:
+  type: ec2
+  description: "Port forward to Ecrion Render service"
+  name_pattern: "ecrion render"
+  connection_type: port_forward
+  remote_port: 50100
+  local_port: 50100
+```
+
+Without a description, TunnelBoy auto-generates one based on the connection type and resource.
 
 Use saved connections:
 
