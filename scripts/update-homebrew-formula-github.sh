@@ -57,15 +57,18 @@ class Tunnelboy < Formula
 
   def caveats
     <<~EOS
-      TunnelBoy requires the AWS Session Manager plugin.
-      Install it with:
+      TunnelBoy requires the AWS Session Manager plugin:
         brew install --cask session-manager-plugin
 
-      For shell completion, add to your ~/.zshrc:
-        source <(tunnelboy completion zsh)
+      To enable shell completion (copy and paste):
+        grep -qxF 'autoload -Uz compinit && compinit' ~/.zshrc || echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+        mkdir -p ~/.zsh/completions && tunnelboy completion zsh > ~/.zsh/completions/_tunnelboy
+        grep -qxF 'fpath=(~/.zsh/completions \$fpath)' ~/.zshrc || echo 'fpath=(~/.zsh/completions \$fpath)' >> ~/.zshrc
+        source ~/.zshrc
 
-      For usage information:
-        tunnelboy --help
+      Get started:
+        tunnelboy profile list
+        tunnelboy connect rds
     EOS
   end
 

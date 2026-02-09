@@ -377,34 +377,60 @@ tunnelboy list rds --quiet         # Just identifiers
 
 TunnelBoy supports shell completion for commands, flags, and resource names (RDS instances, OpenSearch domains, EC2 instances).
 
-### Setup
+### Zsh (macOS default)
 
-**Zsh** (macOS default):
+**Recommended Setup** (one-time installation):
+
 ```bash
-# Add to ~/.zshrc
-source <(tunnelboy completion zsh)
+# 1. Ensure zsh completion is enabled
+grep -qxF 'autoload -Uz compinit && compinit' ~/.zshrc || echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
 
-# Or generate to completion directory
-tunnelboy completion zsh > "${fpath[1]}/_tunnelboy"
+# 2. Generate completion file
+mkdir -p ~/.zsh/completions
+tunnelboy completion zsh > ~/.zsh/completions/_tunnelboy
+
+# 3. Add completion directory to fpath (if not already there)
+grep -qxF 'fpath=(~/.zsh/completions $fpath)' ~/.zshrc || echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+
+# 4. Reload shell
+source ~/.zshrc
 ```
 
-**Bash**:
+**Alternative** (dynamic loading on every shell startup):
+
+```bash
+# Ensure zsh completion prerequisites are enabled
+grep -qxF 'autoload -Uz compinit && compinit' ~/.zshrc || echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+grep -qxF 'autoload bashcompinit && bashcompinit' ~/.zshrc || echo 'autoload bashcompinit && bashcompinit' >> ~/.zshrc
+
+# Add dynamic completion loading
+grep -qxF 'source <(tunnelboy completion zsh)' ~/.zshrc || echo 'source <(tunnelboy completion zsh)' >> ~/.zshrc
+
+# Reload shell
+source ~/.zshrc
+```
+
+### Bash
+
 ```bash
 # Add to ~/.bash_profile or ~/.bashrc
 source <(tunnelboy completion bash)
 
-# Or install to system location
+# Or install to system location (one-time)
 tunnelboy completion bash > /usr/local/etc/bash_completion.d/tunnelboy
 ```
 
-**Fish**:
+### Fish
+
 ```bash
+# One-time setup
 tunnelboy completion fish > ~/.config/fish/completions/tunnelboy.fish
 ```
 
 ### Usage
 
 After setup, restart your shell and try:
+
 ```bash
 tunnelboy connect rds <TAB>
 # Shows: prod-analytics-postgres   staging-api-mysql   dev-warehouse
