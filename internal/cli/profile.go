@@ -81,18 +81,7 @@ func outputProfilesTable(profiles []aws.ProfileInfo) error {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"", "Profile", "Region", "Type"})
 	table.SetBorder(false)
-	table.SetHeaderColor(
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-	)
-	table.SetColumnColor(
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-	)
+	setGreenTableColors(table, 4)
 
 	for _, p := range profiles {
 		marker := " "

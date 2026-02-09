@@ -99,7 +99,7 @@ func outputTunnelsTable(tunnels []TunnelInfo) error {
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"ID", "Type", "Local", "Remote", "Status", "Duration"})
 		table.SetBorder(false)
-		setGreenTableColors(table)
+		setGreenTableColors(table, 6)
 
 		for _, t := range tunnels {
 			local := fmt.Sprintf(":%d", t.LocalPort)

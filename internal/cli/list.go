@@ -120,7 +120,7 @@ func outputJumpHostsTable(jumpHosts []aws.JumpHost, _ []aws.ECSTask) error {
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"Type", "ID/Name", "Private IP", "SSM"})
 		table.SetBorder(false)
-		setGreenTableColors(table)
+		setGreenTableColors(table, 4)
 
 		for _, jh := range jumpHosts {
 			ssmStatus := tui.FormatSSMStatus(jh.SSMEnabled)
@@ -177,7 +177,7 @@ func outputRDSTable(instances []aws.RDSInstance) error {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Identifier", "Engine", "Version", "Class", "Status"})
 	table.SetBorder(false)
-	setGreenTableColors(table)
+	setGreenTableColors(table, 5)
 
 	for _, i := range instances {
 		engine := fmt.Sprintf("%s", i.Engine)
@@ -227,7 +227,7 @@ func outputOpenSearchTable(domains []aws.OpenSearchDomain) error {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Domain", "Version", "Instance Type", "Nodes"})
 	table.SetBorder(false)
-	setGreenTableColors(table)
+	setGreenTableColors(table, 4)
 
 	for _, d := range domains {
 		nodes := fmt.Sprintf("%d", d.InstanceCount)
@@ -277,7 +277,7 @@ func outputEC2Table(instances []aws.EC2Instance) error {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Instance ID", "Name", "Type", "Private IP", "SSM"})
 	table.SetBorder(false)
-	setGreenTableColors(table)
+	setGreenTableColors(table, 5)
 
 	for _, i := range instances {
 		ssmStatus := tui.FormatSSMStatus(i.SSMEnabled)
@@ -308,19 +308,15 @@ func runListAll(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func setGreenTableColors(table *tablewriter.Table) {
-	table.SetHeaderColor(
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor},
-	)
-	table.SetColumnColor(
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-		tablewriter.Colors{tablewriter.FgGreenColor},
-	)
+func setGreenTableColors(table *tablewriter.Table, numColumns int) {
+	headerColors := make([]tablewriter.Colors, numColumns)
+	columnColors := make([]tablewriter.Colors, numColumns)
+	
+	for i := 0; i < numColumns; i++ {
+		headerColors[i] = tablewriter.Colors{tablewriter.Bold, tablewriter.FgGreenColor}
+		columnColors[i] = tablewriter.Colors{tablewriter.FgGreenColor}
+	}
+	
+	table.SetHeaderColor(headerColors...)
+	table.SetColumnColor(columnColors...)
 }
