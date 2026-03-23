@@ -382,19 +382,24 @@ TunnelBoy supports shell completion for commands, flags, and resource names (RDS
 **Recommended Setup** (one-time installation):
 
 ```bash
-# 1. Ensure zsh completion is enabled
-grep -qxF 'autoload -Uz compinit && compinit' ~/.zshrc || echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
-
-# 2. Generate completion file
+# 1. Generate completion file
 mkdir -p ~/.zsh/completions
 tunnelboy completion zsh > ~/.zsh/completions/_tunnelboy
+```
 
-# 3. Add completion directory to fpath (if not already there)
-grep -qxF 'fpath=(~/.zsh/completions $fpath)' ~/.zshrc || echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+Then manually add these lines to `~/.zshrc` **in this order** (fpath must come before compinit):
 
-# 4. Reload shell
+```zsh
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+```bash
+# 2. Reload shell
 source ~/.zshrc
 ```
+
+> **Note:** `fpath` must be set before `compinit` runs. If you use the append-based setup scripts and `compinit` is already in your `.zshrc`, completion will silently fail. Edit `.zshrc` manually to ensure the correct order.
 
 **Alternative** (dynamic loading on every shell startup):
 
