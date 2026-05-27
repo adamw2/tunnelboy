@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -927,8 +928,20 @@ func runConnectPreset(cmd *cobra.Command, args []string) error {
 	}
 }
 
+// safeNamePattern allows only characters valid in AWS profile and preset names.
+// reexecWithGranted interpolates these into a `sh -c` string, so anything outside
+// this set (shell metacharacters, spaces, quotes) is rejected to prevent injection.
+var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 // reexecWithGranted re-executes TunnelBoy via Granted's assume --exec
 func reexecWithGranted(profile string, presetName string) error {
+	if !safeNamePattern.MatchString(profile) {
+		return fmt.Errorf("invalid profile name %q: only letters, digits, '.', '_' and '-' are allowed", profile)
+	}
+	if !safeNamePattern.MatchString(presetName) {
+		return fmt.Errorf("invalid preset name %q: only letters, digits, '.', '_' and '-' are allowed", presetName)
+	}
+
 	// Get the user's shell
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -946,8 +959,10 @@ func reexecWithGranted(profile string, presetName string) error {
 	shellCmd := fmt.Sprintf("source ~/.zshenv 2>/dev/null; source ~/.zshrc 2>/dev/null; assume %s --exec -- %s connect %s",
 		profile, tunnelboyPath, presetName)
 
-	// Create command - invoke through shell
-	cmd := exec.Command(shell, "-c", shellCmd)
+	// Create command - invoke through shell. profile and presetName are validated
+	// against safeNamePattern above; tunnelboyPath is from os.Executable, not user
+	// input — so the interpolated command carries no untrusted shell metacharacters.
+	cmd := exec.Command(shell, "-c", shellCmd) // #nosec G702,G204 -- inputs validated against safeNamePattern; no untrusted data reaches the shell
 	
 	// Set environment variable to prevent infinite recursion
 	cmd.Env = append(os.Environ(), "GRANTED_EXEC=true")
