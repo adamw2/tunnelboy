@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -31,6 +32,17 @@ type Tunnel struct {
 	StartedAt    time.Time
 	session      *SSMSession
 	cancel       context.CancelFunc
+	closeHooks   []func() error
+	hooksMu      sync.Mutex
+}
+
+// AddCloseHook registers a callback to run when this tunnel is closed. Hooks
+// run in registration order after the SSM session is terminated. Errors are
+// logged but do not abort subsequent hooks.
+func (t *Tunnel) AddCloseHook(fn func() error) {
+	t.hooksMu.Lock()
+	defer t.hooksMu.Unlock()
+	t.closeHooks = append(t.closeHooks, fn)
 }
 
 // Manager manages active tunnels
@@ -171,6 +183,17 @@ func (m *Manager) CloseTunnel(id string) error {
 	// Terminate SSM session
 	if tunnel.session != nil {
 		tunnel.session.Close()
+	}
+
+	// Run close hooks (e.g. ECS auto_stop scaling service back to 0).
+	tunnel.hooksMu.Lock()
+	hooks := tunnel.closeHooks
+	tunnel.closeHooks = nil
+	tunnel.hooksMu.Unlock()
+	for _, fn := range hooks {
+		if err := fn(); err != nil {
+			fmt.Fprintf(os.Stderr, "tunnel %s close hook: %v\n", id, err)
+		}
 	}
 
 	tunnel.Status = "closed"

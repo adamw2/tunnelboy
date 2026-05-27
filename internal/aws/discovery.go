@@ -17,12 +17,23 @@ import (
 
 // Discovery handles AWS resource discovery
 type Discovery struct {
-	cfg aws.Config
+	cfg       aws.Config
+	autoStart bool
+	progress  ProgressFunc
 }
 
 // NewDiscovery creates a new discovery client
 func NewDiscovery(cfg aws.Config) *Discovery {
 	return &Discovery{cfg: cfg}
+}
+
+// EnableAutoStart opts this discovery instance into scaling empty ECS services
+// up to 1 during DiscoverJumpHosts. Read-only callers (e.g. `list jump-hosts`)
+// should leave it disabled. The progress callback is optional.
+func (d *Discovery) EnableAutoStart(progress ProgressFunc) *Discovery {
+	d.autoStart = true
+	d.progress = progress
+	return d
 }
 
 // JumpHost represents a unified jump host (EC2 or ECS)
@@ -32,8 +43,10 @@ type JumpHost struct {
 	Type        string // "ec2" or "ecs"
 	PrivateIP   string
 	SSMEnabled  bool
-	ClusterName string // For ECS
-	Tags        map[string]string
+	ClusterName    string // For ECS
+	ServiceName    string // For ECS — set when discovered/started via a service
+	StartedTaskARN string // For ECS — set only when tunnelboy launched this task; drives auto_stop teardown
+	Tags           map[string]string
 }
 
 // EC2Instance represents a discovered EC2 instance
@@ -143,15 +156,18 @@ func (d *Discovery) DiscoverEC2Instances(ctx context.Context) ([]EC2Instance, er
 // DiscoverJumpHosts discovers jump hosts (EC2 and ECS) based on config
 func (d *Discovery) DiscoverJumpHosts(ctx context.Context, cfg *config.Config) ([]JumpHost, error) {
 	var jumpHosts []JumpHost
+	preferECS := cfg.JumpHosts.PreferECS()
 
 	// Get patterns
 	patterns := cfg.JumpHosts.Patterns
-	if len(patterns) == 0 {
+	if len(patterns) == 0 && !preferECS {
+		// When restricted to ECS, the default bastion-name patterns are not
+		// useful — they'd only match EC2 names that we're skipping anyway.
 		patterns = []string{"*bastion*", "*jump*"}
 	}
 
-	// Check explicit instances first
-	if len(cfg.JumpHosts.Instances) > 0 {
+	// Check explicit instances first (EC2 — skipped when prefer=ecs)
+	if !preferECS && len(cfg.JumpHosts.Instances) > 0 {
 		allInstances, err := d.DiscoverEC2Instances(ctx)
 		if err != nil {
 			return nil, err
@@ -180,10 +196,22 @@ func (d *Discovery) DiscoverJumpHosts(ctx context.Context, cfg *config.Config) (
 
 	// Check explicit ECS tasks
 	if len(cfg.JumpHosts.ECS) > 0 {
+		autoStart := d.autoStart && cfg.JumpHosts.AutoStartEnabled()
 		for _, ecsConfig := range cfg.JumpHosts.ECS {
 			tasks, err := d.discoverECSTasksByService(ctx, ecsConfig.Cluster, ecsConfig.Service)
 			if err != nil {
 				continue
+			}
+			var startedARN string
+			if len(tasks) == 0 && autoStart {
+				task, err := d.autoStartECSService(ctx, ecsConfig.Cluster, ecsConfig.Service)
+				if err != nil {
+					// Surface the failure rather than silently falling back —
+					// the user explicitly configured this service.
+					return nil, fmt.Errorf("auto-start %s/%s: %w", ecsConfig.Cluster, ecsConfig.Service, err)
+				}
+				startedARN = task.TaskARN
+				tasks = []ECSTask{*task}
 			}
 			for _, task := range tasks {
 				// Use SSMTarget if available
@@ -191,20 +219,57 @@ func (d *Discovery) DiscoverJumpHosts(ctx context.Context, cfg *config.Config) (
 				if targetID == "" {
 					targetID = task.TaskARN
 				}
-				
+
 				jumpHosts = append(jumpHosts, JumpHost{
-					ID:          targetID,
-					Name:        task.ServiceName,
-					Type:        "ecs",
-					PrivateIP:   task.PrivateIP,
-					ClusterName: task.ClusterName,
-					SSMEnabled:  task.SSMTarget != "", // Only enabled if we have runtime ID
+					ID:             targetID,
+					Name:           task.ServiceName,
+					Type:           "ecs",
+					PrivateIP:      task.PrivateIP,
+					ClusterName:    task.ClusterName,
+					ServiceName:    task.ServiceName,
+					StartedTaskARN: startedARN,
+					SSMEnabled:     task.SSMTarget != "", // Only enabled if we have runtime ID
 				})
 			}
 		}
 		if len(jumpHosts) > 0 {
 			return jumpHosts, nil
 		}
+	}
+
+	// When restricted to ECS, skip the remaining EC2 branches entirely and go
+	// straight to pattern-based ECS discovery (which will also fire auto-start
+	// via patterns if enabled).
+	if preferECS {
+		ecsTasks, _ := d.DiscoverECSTasks(ctx, patterns)
+		for _, task := range ecsTasks {
+			targetID := task.SSMTarget
+			if targetID == "" {
+				targetID = task.TaskARN
+			}
+			jumpHosts = append(jumpHosts, JumpHost{
+				ID:          targetID,
+				Name:        fmt.Sprintf("%s/%s", task.ClusterName, task.TaskDefinition),
+				Type:        "ecs",
+				PrivateIP:   task.PrivateIP,
+				ClusterName: task.ClusterName,
+				ServiceName: task.ServiceName,
+				SSMEnabled:  task.SSMTarget != "",
+			})
+		}
+		if len(jumpHosts) == 0 && d.autoStart && cfg.JumpHosts.AutoStartEnabled() && len(patterns) > 0 {
+			host, err := d.autoStartByPattern(ctx, patterns)
+			if err != nil {
+				return nil, err
+			}
+			if host != nil {
+				jumpHosts = append(jumpHosts, *host)
+			}
+		}
+		if len(jumpHosts) == 0 {
+			return nil, fmt.Errorf("prefer=ecs but no ECS jump host found (configure jump_hosts.ecs or a matching pattern)")
+		}
+		return jumpHosts, nil
 	}
 
 	// Discover EC2 instances by tags
@@ -260,18 +325,74 @@ func (d *Discovery) DiscoverJumpHosts(ctx context.Context, cfg *config.Config) (
 		if targetID == "" {
 			targetID = task.TaskARN
 		}
-		
+
 		jumpHosts = append(jumpHosts, JumpHost{
 			ID:          targetID,
 			Name:        fmt.Sprintf("%s/%s", task.ClusterName, task.TaskDefinition),
 			Type:        "ecs",
 			PrivateIP:   task.PrivateIP,
 			ClusterName: task.ClusterName,
+			ServiceName: task.ServiceName,
 			SSMEnabled:  task.SSMTarget != "", // Only enabled if we have runtime ID
 		})
 	}
 
+	// Pattern-based ECS auto-start: only fire when nothing else matched, so a
+	// pattern hitting a real EC2 bastion never accidentally spins up ECS.
+	if len(jumpHosts) == 0 && d.autoStart && cfg.JumpHosts.AutoStartEnabled() {
+		host, err := d.autoStartByPattern(ctx, patterns)
+		if err != nil {
+			return nil, err
+		}
+		if host != nil {
+			jumpHosts = append(jumpHosts, *host)
+		}
+	}
+
 	return jumpHosts, nil
+}
+
+// autoStartByPattern resolves a single ECS service matching the patterns and
+// starts a task on it. Returns nil host (no error) if no services match — the
+// caller treats that the same as the existing "no jump hosts found" outcome.
+func (d *Discovery) autoStartByPattern(ctx context.Context, patterns []string) (*JumpHost, error) {
+	matches, err := d.FindECSServicesByPattern(ctx, patterns)
+	if err != nil {
+		return nil, err
+	}
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		// fall through
+	default:
+		names := make([]string, 0, len(matches))
+		for _, m := range matches {
+			names = append(names, fmt.Sprintf("%s/%s", extractClusterName(m.Cluster), m.Service))
+		}
+		return nil, fmt.Errorf("auto-start ambiguous: %d services match %v (%s) — narrow the pattern or use explicit jump_hosts.ecs config",
+			len(matches), patterns, strings.Join(names, ", "))
+	}
+
+	ref := matches[0]
+	task, err := d.autoStartECSService(ctx, ref.Cluster, ref.Service)
+	if err != nil {
+		return nil, fmt.Errorf("auto-start %s/%s: %w", ref.Cluster, ref.Service, err)
+	}
+	targetID := task.SSMTarget
+	if targetID == "" {
+		targetID = task.TaskARN
+	}
+	return &JumpHost{
+		ID:             targetID,
+		Name:           fmt.Sprintf("%s/%s", task.ClusterName, task.TaskDefinition),
+		Type:           "ecs",
+		PrivateIP:      task.PrivateIP,
+		ClusterName:    task.ClusterName,
+		ServiceName:    ref.Service,
+		StartedTaskARN: task.TaskARN,
+		SSMEnabled:     task.SSMTarget != "",
+	}, nil
 }
 
 // discoverECSTasksByService discovers ECS tasks in a specific service

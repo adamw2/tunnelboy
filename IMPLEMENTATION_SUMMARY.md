@@ -95,7 +95,7 @@ go mod tidy
 ### 3. Build the Project
 
 ```bash
-make build
+task build
 ```
 
 ### 4. Test the Implementation
