@@ -11,9 +11,11 @@ REPO_URL="https://github.com/${GITHUB_ORG}/${MAIN_REPO}/releases/download/v${VER
 
 echo "Updating Homebrew formula for version ${VERSION}..."
 
-# Download the release assets to calculate SHA256
-curl -L "${REPO_URL}/tunnelboy_darwin_amd64.tar.gz" -o tunnelboy_darwin_amd64.tar.gz
-curl -L "${REPO_URL}/tunnelboy_darwin_arm64.tar.gz" -o tunnelboy_darwin_arm64.tar.gz
+# Download the release assets to calculate SHA256.
+# Use -f so HTTP errors (e.g. a 404 before the asset is published) fail the script
+# instead of silently saving an error page, and --retry to wait for the asset.
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "${REPO_URL}/tunnelboy_darwin_amd64.tar.gz" -o tunnelboy_darwin_amd64.tar.gz
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "${REPO_URL}/tunnelboy_darwin_arm64.tar.gz" -o tunnelboy_darwin_arm64.tar.gz
 
 # Calculate SHA256 for each archive
 SHA_AMD64=$(shasum -a 256 tunnelboy_darwin_amd64.tar.gz | awk '{print $1}')
