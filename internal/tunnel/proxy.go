@@ -64,9 +64,12 @@ func NewOpenSearchProxy(cfg OpenSearchProxyConfig) (*OpenSearchProxy, error) {
 
 // Start starts the proxy server
 func (p *OpenSearchProxy) Start(ctx context.Context) error {
-	// Configure TLS settings
+	// Configure TLS settings. When tunneling, the connection terminates at
+	// localhost (the SSM port-forward) so the cert can't match the hostname;
+	// the underlying traffic is already encrypted inside the SSM session and
+	// SNI is overridden to the real domain below.
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: p.useTunnel, // Skip verification for localhost tunnel
+		InsecureSkipVerify: p.useTunnel, // #nosec G402 -- localhost endpoint of an SSM-encrypted tunnel
 	}
 	
 	// If using tunnel, override SNI to use the domain name
@@ -134,8 +137,9 @@ func (p *OpenSearchProxy) Start(ctx context.Context) error {
 	})
 
 	p.server = &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", p.localPort),
-		Handler: handler,
+		Addr:              fmt.Sprintf("127.0.0.1:%d", p.localPort),
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second, // bound slow-header (Slowloris) clients
 	}
 
 	// Start server in goroutine

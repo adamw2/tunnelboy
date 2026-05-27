@@ -112,6 +112,18 @@ tasks:
     cmds:
       - golangci-lint run
 
+  scan:
+    desc: Security scan (dependency CVEs + SAST)
+    cmds:
+      # Installs are no-ops once present; pinned to @latest for up-to-date advisories.
+      - go install golang.org/x/vuln/cmd/govulncheck@latest
+      - go install github.com/securego/gosec/v2/cmd/gosec@latest
+      - '{{.GOBIN}}/govulncheck ./...'
+      - '{{.GOBIN}}/gosec -quiet ./...'
+    vars:
+      GOBIN:
+        sh: go env GOPATH | sed 's:$:/bin:'
+
   deps:
     desc: Download dependencies
     cmds:

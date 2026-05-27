@@ -206,7 +206,7 @@ func (m *SSMManager) runSessionPlugin(ctx context.Context, output *ssm.StartSess
 		endpoint,
 	}
 
-	cmd := exec.CommandContext(ctx, "session-manager-plugin", args...)
+	cmd := exec.CommandContext(ctx, "session-manager-plugin", args...) // #nosec G204 -- fixed binary, args passed as argv slice (no shell), so no injection
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	
