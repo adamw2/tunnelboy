@@ -119,6 +119,7 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	}
 
 	discovery := aws.NewDiscovery(pm.GetConfig())
+	enableECSAutoStart(discovery)
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -189,6 +190,7 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get jump host
+	var selectedHost *aws.JumpHost
 	jumpHost := connectVia
 	if jumpHost == "" {
 		jumpHosts, err := discovery.DiscoverJumpHosts(ctx, cfg)
@@ -196,14 +198,14 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("no jump host found. Configure jump_hosts in ~/.tunnelboy.yaml or use --via")
 		}
 		if len(jumpHosts) == 1 {
-			jumpHost = jumpHosts[0].ID
+			selectedHost = &jumpHosts[0]
 		} else {
-			selected, err := tui.SelectJumpHost(jumpHosts)
+			selectedHost, err = tui.SelectJumpHost(jumpHosts)
 			if err != nil {
 				return err
 			}
-			jumpHost = selected.ID
 		}
+		jumpHost = selectedHost.ID
 	}
 
 	// Create tunnel
@@ -230,6 +232,7 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create tunnel: %w", err)
 	}
+	registerAutoStopIfECS(t, selectedHost, cfg, discovery)
 
 	// Generate IAM auth token
 	fmt.Println()
@@ -305,6 +308,7 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	discovery := aws.NewDiscovery(pm.GetConfig())
+	enableECSAutoStart(discovery)
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -344,6 +348,7 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get jump host
+	var selectedHost *aws.JumpHost
 	jumpHost := connectVia
 	if jumpHost == "" {
 		jumpHosts, err := discovery.DiscoverJumpHosts(ctx, cfg)
@@ -351,14 +356,14 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("no jump host found")
 		}
 		if len(jumpHosts) == 1 {
-			jumpHost = jumpHosts[0].ID
+			selectedHost = &jumpHosts[0]
 		} else {
-			selected, err := tui.SelectJumpHost(jumpHosts)
+			selectedHost, err = tui.SelectJumpHost(jumpHosts)
 			if err != nil {
 				return err
 			}
-			jumpHost = selected.ID
 		}
+		jumpHost = selectedHost.ID
 	}
 
 	// Create tunnel manager
@@ -379,7 +384,7 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 		tui.TextStyle.Render(domain.DomainName))
 
 	// Create SSM tunnel to OpenSearch HTTPS port on internal port
-	_, err = tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
+	osTunnel, err := tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
 		Type:       tunnel.TunnelTypeOpenSearch,
 		LocalPort:  tunnelPort,
 		RemoteHost: domain.Endpoint,
@@ -389,6 +394,7 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create tunnel: %w", err)
 	}
+	registerAutoStopIfECS(osTunnel, selectedHost, cfg, discovery)
 
 	fmt.Printf("%s Starting signing proxy...\n", tui.DimStyle.Render("►"))
 
@@ -452,6 +458,7 @@ func runConnectEC2(cmd *cobra.Command, args []string) error {
 	}
 
 	discovery := aws.NewDiscovery(pm.GetConfig())
+	enableECSAutoStart(discovery)
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -548,6 +555,7 @@ func runConnectEC2(cmd *cobra.Command, args []string) error {
 		})
 	} else {
 		// Via jump host
+		var selectedHost *aws.JumpHost
 		jumpHost := connectVia
 		if jumpHost == "" {
 			jumpHosts, err := discovery.DiscoverJumpHosts(ctx, cfg)
@@ -555,14 +563,14 @@ func runConnectEC2(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("no jump host found. Use --direct if target has SSM, or --via to specify jump host")
 			}
 			if len(jumpHosts) == 1 {
-				jumpHost = jumpHosts[0].ID
+				selectedHost = &jumpHosts[0]
 			} else {
-				selected, err := tui.SelectJumpHost(jumpHosts)
+				selectedHost, err = tui.SelectJumpHost(jumpHosts)
 				if err != nil {
 					return err
 				}
-				jumpHost = selected.ID
 			}
+			jumpHost = selectedHost.ID
 		}
 
 		fmt.Printf("%s Creating tunnel to %s via %s...\n",
@@ -577,6 +585,9 @@ func runConnectEC2(cmd *cobra.Command, args []string) error {
 			RemotePort: connectRemotePort,
 			JumpHostID: jumpHost,
 		})
+		if err == nil {
+			registerAutoStopIfECS(t, selectedHost, cfg, discovery)
+		}
 	}
 
 	if err != nil {
@@ -614,6 +625,7 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 	}
 
 	discovery := aws.NewDiscovery(pm.GetConfig())
+	enableECSAutoStart(discovery)
 
 	// Discover all EC2 instances
 	instances, err := discovery.DiscoverEC2Instances(ctx)
@@ -710,6 +722,7 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 		})
 	} else {
 		// Via jump host
+		var selectedHost *aws.JumpHost
 		jumpHost := connectVia
 		if jumpHost == "" {
 			jumpHosts, err := discovery.DiscoverJumpHosts(ctx, cfg)
@@ -717,14 +730,14 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 				return fmt.Errorf("no jump host found. Use --direct if target has SSM, or --via to specify jump host")
 			}
 			if len(jumpHosts) == 1 {
-				jumpHost = jumpHosts[0].ID
+				selectedHost = &jumpHosts[0]
 			} else {
-				selected, err := tui.SelectJumpHost(jumpHosts)
+				selectedHost, err = tui.SelectJumpHost(jumpHosts)
 				if err != nil {
 					return err
 				}
-				jumpHost = selected.ID
 			}
+			jumpHost = selectedHost.ID
 		}
 
 		fmt.Printf("%s Creating tunnel to %s via %s...\n",
@@ -739,6 +752,9 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 			RemotePort: connectRemotePort,
 			JumpHostID: jumpHost,
 		})
+		if err == nil {
+			registerAutoStopIfECS(t, selectedHost, cfg, discovery)
+		}
 	}
 
 	if err != nil {

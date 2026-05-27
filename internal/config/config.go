@@ -19,6 +19,34 @@ type JumpHosts struct {
 	Tags      []TagFilter `mapstructure:"tags"`
 	Instances []string   `mapstructure:"instances"`
 	ECS       []ECSTarget `mapstructure:"ecs"`
+
+	// Prefer constrains discovery to a single host type. Currently only "ecs"
+	// is meaningful — it skips all EC2 branches (explicit instances, tags,
+	// patterns) so a bastion can never be picked even if it would otherwise
+	// match. Empty string keeps the default mixed behavior.
+	Prefer string `mapstructure:"prefer"`
+
+	// ECSAutoStart enables scaling an ECS service to 1 when no running task is
+	// found during discovery. Pointer so users can explicitly disable; nil means
+	// use the default (true).
+	ECSAutoStart *bool `mapstructure:"ecs_auto_start"`
+	// ECSAutoStop scales the service back to 0 on tunnel close. Off by default
+	// since most tunnel tasks self-terminate on idle.
+	ECSAutoStop bool `mapstructure:"ecs_auto_stop"`
+}
+
+// PreferECS reports whether discovery should restrict itself to ECS hosts.
+func (j JumpHosts) PreferECS() bool {
+	return j.Prefer == "ecs"
+}
+
+// AutoStartEnabled reports whether ECS auto-start should run during discovery.
+// Defaults to true when unset.
+func (j JumpHosts) AutoStartEnabled() bool {
+	if j.ECSAutoStart == nil {
+		return true
+	}
+	return *j.ECSAutoStart
 }
 
 // TagFilter represents an AWS tag filter
