@@ -40,6 +40,9 @@ tunnelboy.yaml
 *.tar.gz
 checksums.txt
 
+# Task (go-task) local cache
+.task/
+
 # Go workspace
 go.work
 go.work.sum

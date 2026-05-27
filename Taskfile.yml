@@ -1,0 +1,128 @@
+version: '3'
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: -s -w -X main.version={{.VERSION}} -X main.commit={{.COMMIT}} -X main.date={{.DATE}}
+  # Resolve the bin dir that's actually first on PATH. brew --prefix returns
+  # /opt/homebrew on Apple Silicon and /usr/local on Intel; fall back to
+  # /usr/local when brew isn't installed.
+  INSTALL_PREFIX:
+    sh: brew --prefix 2>/dev/null || echo /usr/local
+  INSTALL_LINK: '{{.INSTALL_PREFIX}}/bin/tunnelboy'
+
+tasks:
+  default:
+    desc: Build for current platform
+    deps: [build]
+
+  build:
+    desc: Build for current platform
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/tunnelboy ./cmd/tunnelboy
+    sources:
+      - ./**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - bin/tunnelboy
+
+  build-darwin-amd64:
+    desc: Build for macOS Intel
+    cmds:
+      - GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "{{.LDFLAGS}}" -o bin/tunnelboy_darwin_amd64 ./cmd/tunnelboy
+
+  build-darwin-arm64:
+    desc: Build for macOS Apple Silicon
+    cmds:
+      - GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "{{.LDFLAGS}}" -o bin/tunnelboy_darwin_arm64 ./cmd/tunnelboy
+
+  build-all:
+    desc: Build for all macOS architectures
+    deps: [build-darwin-amd64, build-darwin-arm64]
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf bin/
+      - rm -f tunnelboy
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+
+  test-coverage:
+    desc: Run tests with coverage
+    cmds:
+      - go test -v -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+
+  install:
+    desc: Install to GOPATH/bin
+    cmds:
+      - go install -ldflags "{{.LDFLAGS}}" ./cmd/tunnelboy
+
+  install-dev:
+    desc: Symlink the dev build into the active bin dir (Homebrew prefix or /usr/local)
+    deps: [build]
+    cmds:
+      - 'echo "Creating development symlink at {{.INSTALL_LINK}}..."'
+      - |
+        if [ -e {{.INSTALL_LINK}} ] && [ ! -L {{.INSTALL_LINK}} ]; then
+          echo "⚠  {{.INSTALL_LINK}} exists and is not a symlink (likely a Homebrew install)."
+          echo "   Run 'brew uninstall tunnelboy' first, or remove the file manually."
+          exit 1
+        fi
+      - sudo ln -sf $(pwd -P)/bin/tunnelboy {{.INSTALL_LINK}}
+      - 'echo "✓ Symlink created: {{.INSTALL_LINK}} -> $(pwd -P)/bin/tunnelboy"'
+      - echo ""
+      - 'echo "Note: Run ''task uninstall-dev'' before reinstalling via Homebrew"'
+    silent: true
+
+  uninstall-dev:
+    desc: Remove the dev symlink (checks both Homebrew and /usr/local locations)
+    cmds:
+      - |
+        removed=0
+        for link in {{.INSTALL_LINK}} /usr/local/bin/tunnelboy /opt/homebrew/bin/tunnelboy; do
+          if [ -L "$link" ]; then
+            sudo rm -f "$link"
+            echo "✓ Removed symlink: $link"
+            removed=1
+          fi
+        done
+        if [ "$removed" = "0" ]; then
+          echo "No development symlink found"
+        fi
+    silent: true
+
+  run:
+    desc: Build and run
+    deps: [build]
+    cmds:
+      - ./bin/tunnelboy
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run
+
+  deps:
+    desc: Download dependencies
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  release:
+    desc: Create release archives
+    deps: [build-all]
+    cmds:
+      - mkdir -p dist
+      - cd bin && tar -czvf ../dist/tunnelboy_darwin_amd64.tar.gz tunnelboy_darwin_amd64
+      - cd bin && tar -czvf ../dist/tunnelboy_darwin_arm64.tar.gz tunnelboy_darwin_arm64
+      - cd dist && sha256sum *.tar.gz > checksums.txt

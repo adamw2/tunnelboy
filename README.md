@@ -494,24 +494,26 @@ brew install --cask session-manager-plugin
 
 ## Development
 
+Build tooling uses [Task](https://taskfile.dev) (`brew install go-task`). Run `task --list` to see all targets.
+
 ```bash
 # Build
-make build
+task build
 
 # Run tests
-make test
+task test
 
 # Build for all macOS architectures
-make build-all
+task build-all
 
 # Install for development (creates symlink)
-make install-dev
+task install-dev
 
 # Remove development symlink
-make uninstall-dev
+task uninstall-dev
 
 # Install to GOPATH/bin
-make install
+task install
 ```
 
 ### Development Setup
@@ -520,7 +522,7 @@ For active development, use the symlink approach:
 
 ```bash
 # Build and install development symlink
-make install-dev
+task install-dev
 
 # Now tunnelboy is available system-wide
 tunnelboy version
@@ -529,13 +531,13 @@ tunnelboy version
 source <(tunnelboy completion zsh)
 
 # Make changes, rebuild, and test immediately
-make build
+task build
 tunnelboy connect rds  # Uses latest build!
 ```
 
 **Important:** Remove the development symlink before installing via Homebrew:
 ```bash
-make uninstall-dev
+task uninstall-dev
 brew install tunnelboy
 ```
 
