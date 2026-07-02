@@ -79,6 +79,7 @@ type Connection struct {
 	KibanaPort     int    `mapstructure:"kibana_port"`
 	Via            string `mapstructure:"via"`    // Jump host instance ID
 	Direct         bool   `mapstructure:"direct"` // Direct SSM connection
+	Detach         bool   `mapstructure:"detach"` // Run tunnel in the background
 }
 
 // Load loads the configuration from viper

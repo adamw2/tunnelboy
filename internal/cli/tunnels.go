@@ -3,21 +3,20 @@ package cli
 import (
 	"fmt"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/adamw2/tunnelboy/internal/state"
 	"github.com/adamw2/tunnelboy/internal/tui"
 )
-
-// Note: This is a simplified version. In a full implementation,
-// you'd persist tunnel state to a file or use a daemon process.
 
 var tunnelsCmd = &cobra.Command{
 	Use:   "tunnels",
 	Short: "List active tunnels",
-	Long:  "Show all currently active tunnels managed by TunnelBoy",
+	Long:  "Show all currently active tunnels (foreground and detached) managed by TunnelBoy",
 	RunE:  runTunnels,
 }
 
@@ -36,57 +35,16 @@ func init() {
 	rootCmd.AddCommand(disconnectCmd)
 
 	disconnectCmd.Flags().BoolVar(&disconnectAll, "all", false, "disconnect all tunnels")
+	disconnectCmd.ValidArgsFunction = completeTunnelIDs
 }
 
 func runTunnels(cmd *cobra.Command, args []string) error {
-	// In a full implementation, this would read from a state file
-	// or communicate with a daemon process.
-	
-	// For now, show a message about the current implementation
-	fmt.Println(tui.TitleStyle.Render("Active Tunnels"))
-	fmt.Println()
-	fmt.Println(tui.DimStyle.Render("Tunnels are managed within each connect session."))
-	fmt.Println(tui.DimStyle.Render("Use Ctrl+C in the connect session to close the tunnel."))
-	fmt.Println()
-	fmt.Println(tui.DimStyle.Render("For persistent tunnel management, a daemon mode is planned for a future release."))
-
-	return nil
-}
-
-func runDisconnect(cmd *cobra.Command, args []string) error {
-	if disconnectAll {
-		fmt.Println(tui.DimStyle.Render("Disconnecting all tunnels..."))
-		// In a full implementation, this would signal the daemon
-		fmt.Println(tui.SuccessStyle.Render("✓ All tunnels closed"))
-		return nil
+	tunnels, err := state.List()
+	if err != nil {
+		return fmt.Errorf("read tunnel state: %w", err)
 	}
 
-	if len(args) == 0 {
-		return fmt.Errorf("specify a tunnel ID or use --all")
-	}
-
-	tunnelID := args[0]
-	fmt.Printf("%s Closing tunnel %s...\n", tui.DimStyle.Render("►"), tunnelID)
-	// In a full implementation, this would signal the daemon
-	fmt.Printf("%s Tunnel %s closed\n", tui.SuccessStyle.Render("✓"), tunnelID)
-
-	return nil
-}
-
-// TunnelInfo represents tunnel information for display
-type TunnelInfo struct {
-	ID         string
-	Type       string
-	LocalPort  int
-	RemoteHost string
-	RemotePort int
-	Status     string
-	Duration   time.Duration
-}
-
-func outputTunnelsTable(tunnels []TunnelInfo) error {
 	output := viper.GetString("output")
-
 	switch output {
 	case "json":
 		return outputJSON(tunnels)
@@ -95,29 +53,127 @@ func outputTunnelsTable(tunnels []TunnelInfo) error {
 			fmt.Println(t.ID)
 		}
 		return nil
-	default:
-		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"ID", "Type", "Local", "Remote", "Status", "Duration"})
-		table.SetBorder(false)
-		setGreenTableColors(table, 6)
+	}
 
-		for _, t := range tunnels {
-			local := fmt.Sprintf(":%d", t.LocalPort)
-			remote := fmt.Sprintf("%s:%d", t.RemoteHost, t.RemotePort)
-			duration := formatDuration(t.Duration)
-			table.Append([]string{t.ID, t.Type, local, remote, t.Status, duration})
-		}
-		table.Render()
+	fmt.Println(tui.TitleStyle.Render("Active Tunnels"))
+	if len(tunnels) == 0 {
+		fmt.Println(tui.DimStyle.Render("No active tunnels. Start one with: tunnelboy connect <type> --detach"))
 		return nil
 	}
+	fmt.Println()
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"ID", "Type", "Target", "Local Port", "Profile", "Mode", "Uptime"})
+	table.SetBorder(false)
+	setGreenTableColors(table, 7)
+
+	for _, t := range tunnels {
+		mode := "foreground"
+		if t.Detached {
+			mode = "background"
+		}
+		uptime := time.Since(t.StartedAt).Round(time.Second).String()
+		table.Append([]string{
+			t.ID, t.Type, t.Target,
+			fmt.Sprintf("%d", t.LocalPort),
+			t.Profile, mode, uptime,
+		})
+	}
+	table.Render()
+	fmt.Println()
+	fmt.Println(tui.DimStyle.Render("Close with: tunnelboy disconnect <id>  (or --all)"))
+	return nil
 }
 
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+// disconnectTimeout bounds how long we wait for a signalled tunnel process to
+// clean up before escalating to SIGKILL.
+const disconnectTimeout = 10 * time.Second
+
+func runDisconnect(cmd *cobra.Command, args []string) error {
+	if !disconnectAll && len(args) == 0 {
+		return fmt.Errorf("specify a tunnel ID or use --all (see: tunnelboy tunnels)")
 	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
+
+	tunnels, err := state.List()
+	if err != nil {
+		return fmt.Errorf("read tunnel state: %w", err)
 	}
-	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+
+	var targets []state.TunnelState
+	if disconnectAll {
+		targets = tunnels
+	} else {
+		for _, t := range tunnels {
+			if t.ID == args[0] {
+				targets = append(targets, t)
+				break
+			}
+		}
+		if len(targets) == 0 {
+			return fmt.Errorf("tunnel %q not found (see: tunnelboy tunnels)", args[0])
+		}
+	}
+
+	if len(targets) == 0 {
+		fmt.Println(tui.DimStyle.Render("No active tunnels"))
+		return nil
+	}
+
+	var failed int
+	for i := range targets {
+		if err := disconnectTunnel(&targets[i]); err != nil {
+			failed++
+			fmt.Printf("%s %s: %v\n", tui.ErrorStyle.Render("✗"), targets[i].ID, err)
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d tunnel(s) failed to disconnect", failed)
+	}
+	return nil
+}
+
+// disconnectTunnel sends SIGTERM to the owning process (triggering its normal
+// close path: SSM teardown, ECS auto-stop hooks, state removal) and escalates
+// to SIGKILL if it doesn't clean up in time.
+func disconnectTunnel(t *state.TunnelState) error {
+	fmt.Printf("%s Closing tunnel %s (pid %d)...\n", tui.DimStyle.Render("►"), t.ID, t.PID)
+
+	if err := state.Signal(t, syscall.SIGTERM); err != nil {
+		// Process already gone: just clear the record.
+		_ = state.Remove(t.ID)
+		fmt.Printf("%s Tunnel %s was already dead, removed stale record\n", tui.WarningStyle.Render("⚠"), t.ID)
+		return nil
+	}
+
+	deadline := time.Now().Add(disconnectTimeout)
+	for time.Now().Before(deadline) {
+		if !state.IsAlive(t.PID) {
+			_ = state.Remove(t.ID) // in case the process died before its cleanup
+			fmt.Printf("%s Tunnel %s closed\n", tui.SuccessStyle.Render("✓"), t.ID)
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Escalate. Close hooks (e.g. ECS auto-stop) are skipped by SIGKILL, so say so.
+	_ = state.Signal(t, syscall.SIGKILL)
+	_ = state.Remove(t.ID)
+	fmt.Printf("%s Tunnel %s force-killed after %s (close hooks may not have run)\n",
+		tui.WarningStyle.Render("⚠"), t.ID, disconnectTimeout)
+	return nil
+}
+
+func completeTunnelIDs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) != 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	tunnels, err := state.List()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	var completions []string
+	for _, t := range tunnels {
+		completions = append(completions, fmt.Sprintf("%s\t%s → localhost:%d", t.ID, t.Target, t.LocalPort))
+	}
+	return completions, cobra.ShellCompDirectiveNoFileComp
 }

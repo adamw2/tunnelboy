@@ -107,6 +107,7 @@ func init() {
 	for _, c := range []*cobra.Command{connectRedisCmd, connectDocDBCmd, connectMSKCmd} {
 		c.Flags().IntVar(&connectLocalPort, "local-port", 0, "local port (default: same as remote)")
 		c.Flags().StringVar(&connectVia, "via", "", "jump host instance ID")
+		c.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
 	}
 }
 
@@ -194,6 +195,29 @@ func runConnectEndpoint(kind endpointKind, args []string) error {
 		return err
 	}
 
+	if connectDetach {
+		spec := tunnelSpec{
+			Type:       string(kind.tunnelType),
+			Engine:     target.Engine,
+			Target:     target.Name,
+			LocalPort:  localPort,
+			RemoteHost: target.Endpoint,
+			RemotePort: int(target.Port),
+			JumpHostID: jumpHost,
+			Profile:    pm.GetCurrentProfile(),
+		}
+		applyAutoStop(&spec, selectedHost, cfg)
+		fmt.Printf("%s Starting background tunnel to %s...\n",
+			tui.DimStyle.Render("►"),
+			tui.TextStyle.Render(target.Name))
+		st, err := spawnDetached(spec)
+		if err != nil {
+			return err
+		}
+		printDetached(st)
+		return nil
+	}
+
 	fmt.Printf("%s Creating tunnel to %s...\n",
 		tui.DimStyle.Render("►"),
 		tui.TextStyle.Render(target.Name))
@@ -225,9 +249,7 @@ func runConnectEndpoint(kind endpointKind, args []string) error {
 	}
 	fmt.Println(tui.DimStyle.Render("Press Ctrl+C to disconnect"))
 
-	waitForInterrupt()
-	_ = tunnelMgr.CloseAll()
-	fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
+	holdTunnel(tunnelMgr, tunnelStateFor(t, target.Name, pm.GetCurrentProfile()))
 
 	return nil
 }

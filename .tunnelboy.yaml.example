@@ -52,6 +52,7 @@ connections:
     via: i-0abc123def456789  # Optional: pin to specific jump host
     exec: true               # Optional: launch psql/mysql after connecting
     db_name: analytics       # Optional: database name for exec
+    # detach: true           # Optional: run in background (see: tunnelboy tunnels)
 
   staging-mysql:
     type: rds

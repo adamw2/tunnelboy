@@ -158,13 +158,30 @@ TunnelBoy reconnects automatically with exponential backoff, up to 5 attempts.
 If reconnection fails because your credentials expired, it tells you exactly
 what to run instead of retrying forever.
 
-### Tunnel Management
+### Background Tunnels
+
+Add `--detach` to any tunnel command to run it in the background and get your
+terminal back. One terminal can then hold as many tunnels as you need.
 
 ```bash
-tunnelboy tunnels                   # List active tunnels
-tunnelboy disconnect <tunnel-id>    # Close specific tunnel
+tunnelboy connect rds my-db --db-user readonly --detach
+tunnelboy connect opensearch my-domain --detach
+tunnelboy connect redis my-cache --detach
+
+tunnelboy tunnels                   # List active tunnels (foreground + background)
+tunnelboy disconnect rds-3306       # Close a specific tunnel (tab-completes)
 tunnelboy disconnect --all          # Close all tunnels
 ```
+
+Background tunnels log to `~/.tunnelboy/logs/<id>.log` (including reconnect
+activity) and survive the parent terminal closing. `disconnect` triggers the
+tunnel's normal close path, including ECS auto-stop hooks. Foreground tunnels
+also appear in `tunnelboy tunnels` and can be closed the same way.
+
+Not available for interactive modes: EC2 shell (use `--port-forward`) and
+`--exec`.
+
+Presets can set `detach: true` to always background a connection.
 
 ### EC2 Interactive Shell
 

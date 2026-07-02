@@ -8,11 +8,13 @@ import (
 	"os/signal"
 	"regexp"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/adamw2/tunnelboy/internal/aws"
 	"github.com/adamw2/tunnelboy/internal/config"
+	"github.com/adamw2/tunnelboy/internal/state"
 	"github.com/adamw2/tunnelboy/internal/tui"
 	"github.com/adamw2/tunnelboy/internal/tunnel"
 )
@@ -29,6 +31,7 @@ var (
 	connectPrintToken   bool
 	connectShell        bool
 	connectPortForward  bool
+	connectDetach       bool
 )
 
 var connectCmd = &cobra.Command{
@@ -93,6 +96,10 @@ func init() {
 	connectRDSCmd.Flags().BoolVar(&connectPrintToken, "print-token", false, "print only the IAM token and exit")
 	connectRDSCmd.Flags().BoolVar(&connectExec, "exec", false, "launch psql/mysql through the tunnel with the IAM token")
 	connectRDSCmd.Flags().StringVar(&connectDBName, "db-name", "", "database name (for --exec)")
+	connectRDSCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
+
+	connectOpenSearchCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
+	connectEC2Cmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background (port-forward mode only)")
 
 	// OpenSearch flags
 	connectOpenSearchCmd.Flags().IntVar(&connectLocalPort, "local-port", 0, "local port for API (default 9250; Chrome blocks 9200)")
@@ -222,6 +229,44 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if connectDetach {
+		if connectExec {
+			return fmt.Errorf("--detach cannot be combined with --exec (the client is interactive)")
+		}
+		spec := tunnelSpec{
+			Type:       string(tunnel.TunnelTypeRDS),
+			Engine:     rdsInstance.Engine,
+			Target:     rdsInstance.Identifier,
+			LocalPort:  localPort,
+			RemoteHost: rdsInstance.Endpoint,
+			RemotePort: int(rdsInstance.Port),
+			JumpHostID: jumpHost,
+			Profile:    pm.GetCurrentProfile(),
+		}
+		applyAutoStop(&spec, selectedHost, cfg)
+
+		fmt.Printf("%s Starting background tunnel to %s...\n",
+			tui.DimStyle.Render("►"),
+			tui.TextStyle.Render(rdsInstance.Identifier))
+		st, err := spawnDetached(spec)
+		if err != nil {
+			return err
+		}
+		printDetached(st)
+
+		token, err := aws.GenerateRDSAuthToken(ctx, pm.GetConfig(), rdsInstance.Endpoint,
+			int(rdsInstance.Port), pm.GetConfig().Region, dbUser)
+		if err != nil {
+			fmt.Printf("%s Could not generate IAM token: %v\n", tui.WarningStyle.Render("⚠"), err)
+			return nil
+		}
+		fmt.Println()
+		fmt.Println(tui.TitleStyle.Render("IAM Authentication Token"))
+		fmt.Println(tui.DimStyle.Render("Use as password (valid 15 minutes; rerun with --print-token for a fresh one):"))
+		fmt.Println(tui.TextStyle.Render(token))
+		return nil
+	}
+
 	fmt.Printf("%s Creating tunnel to %s...\n",
 		tui.DimStyle.Render("►"),
 		tui.TextStyle.Render(rdsInstance.Identifier))
@@ -275,7 +320,10 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 			tunnelMgr.CloseAll()
 			return fmt.Errorf("cannot use --exec: IAM token generation failed")
 		}
+		st := tunnelStateFor(t, rdsInstance.Identifier, pm.GetCurrentProfile())
+		_ = state.Write(st)
 		clientErr := runDBClient(rdsInstance.Engine, dbUser, connectDBName, t.LocalPort, token)
+		_ = state.Remove(st.ID)
 		tunnelMgr.CloseAll()
 		fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
 		return clientErr
@@ -303,10 +351,7 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	
 	fmt.Println(tui.DimStyle.Render("Press Ctrl+C to disconnect"))
 
-	// Wait for interrupt
-	waitForInterrupt()
-	tunnelMgr.CloseAll()
-	fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
+	holdTunnel(tunnelMgr, tunnelStateFor(t, rdsInstance.Identifier, pm.GetCurrentProfile()))
 
 	return nil
 }
@@ -402,6 +447,34 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if connectDetach {
+		spec := tunnelSpec{
+			Type:           string(tunnel.TunnelTypeOpenSearch),
+			Target:         domain.DomainName,
+			LocalPort:      tunnelPort,
+			RemoteHost:     domain.Endpoint,
+			RemotePort:     443,
+			JumpHostID:     jumpHost,
+			Profile:        pm.GetCurrentProfile(),
+			DomainEndpoint: domain.Endpoint,
+			ProxyPort:      localPort,
+		}
+		applyAutoStop(&spec, selectedHost, cfg)
+
+		fmt.Printf("%s Starting background tunnel to %s...\n",
+			tui.DimStyle.Render("►"),
+			tui.TextStyle.Render(domain.DomainName))
+		st, err := spawnDetached(spec)
+		if err != nil {
+			return err
+		}
+		printDetached(st)
+		fmt.Println()
+		fmt.Printf("  %s http://localhost:%d\n", tui.DimStyle.Render("API:       "), st.LocalPort)
+		fmt.Printf("  %s http://localhost:%d/_dashboards\n", tui.DimStyle.Render("Dashboards:"), st.LocalPort)
+		return nil
+	}
+
 	fmt.Printf("%s Creating tunnel to %s...\n",
 		tui.DimStyle.Render("►"),
 		tui.TextStyle.Render(domain.DomainName))
@@ -456,10 +529,16 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println(tui.DimStyle.Render("Press Ctrl+C to disconnect"))
 
-	// Wait for interrupt
+	// Register under the user-facing proxy port, not the internal tunnel port
+	st := tunnelStateFor(osTunnel, domain.DomainName, pm.GetCurrentProfile())
+	st.ID = fmt.Sprintf("%s-%d", tunnel.TunnelTypeOpenSearch, localPort)
+	st.LocalPort = localPort
+	_ = state.Write(st)
+
 	waitForInterrupt()
 
 	// Clean up
+	_ = state.Remove(st.ID)
 	proxy.Stop()
 	tunnelMgr.CloseAll()
 	fmt.Println(tui.DimStyle.Render("\nConnection closed"))
@@ -520,118 +599,7 @@ func runConnectEC2(cmd *cobra.Command, args []string) error {
 		instance = selected
 	}
 
-	ssmMgr := tunnel.NewSSMManager(pm.GetConfig(), pm.GetCurrentProfile())
-
-	// Determine connection mode: shell is default, unless --port-forward is specified
-	useShell := !connectPortForward
-	
-	// Handle interactive shell mode (default)
-	if useShell {
-		// Shell mode only works with direct SSM connection
-		if !instance.SSMEnabled {
-			return fmt.Errorf("instance %s is not SSM-enabled. Interactive shell requires SSM", instance.InstanceID)
-		}
-
-		fmt.Printf("%s Opening interactive shell on %s",
-			tui.DimStyle.Render("►"),
-			tui.TextStyle.Render(instance.InstanceID))
-		if instance.Name != "" {
-			fmt.Printf(" (%s)", tui.DimStyle.Render(instance.Name))
-		}
-		fmt.Println("...")
-		fmt.Println()
-
-		// Start interactive session
-		session, err := ssmMgr.StartInteractiveSession(ctx, instance.InstanceID)
-		if err != nil {
-			return fmt.Errorf("failed to start interactive session: %w", err)
-		}
-
-		// Wait for session to end
-		<-session.Done()
-		
-		fmt.Println()
-		fmt.Println(tui.DimStyle.Render("Session closed"))
-		return nil
-	}
-
-	// Port forwarding mode
-	tunnelMgr := tunnel.NewManager(ssmMgr)
-	var t *tunnel.Tunnel
-
-	if connectDirect {
-		// Direct SSM connection
-		if !instance.SSMEnabled {
-			return fmt.Errorf("instance %s is not SSM-enabled. Use --via to specify a jump host", instance.InstanceID)
-		}
-
-		fmt.Printf("%s Creating direct tunnel to %s...\n",
-			tui.DimStyle.Render("►"),
-			tui.TextStyle.Render(instance.InstanceID))
-
-		t, err = tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
-			Type:       tunnel.TunnelTypeEC2,
-			LocalPort:  connectLocalPort,
-			RemotePort: connectRemotePort,
-			Direct:     true,
-			TargetID:   instance.InstanceID,
-		})
-	} else {
-		// Via jump host
-		var selectedHost *aws.JumpHost
-		jumpHost := connectVia
-		if jumpHost == "" {
-			jumpHosts, err := discovery.DiscoverJumpHosts(ctx, cfg)
-			if err != nil || len(jumpHosts) == 0 {
-				return fmt.Errorf("no jump host found. Use --direct if target has SSM, or --via to specify jump host")
-			}
-			if len(jumpHosts) == 1 {
-				selectedHost = &jumpHosts[0]
-			} else {
-				selectedHost, err = tui.SelectJumpHost(jumpHosts)
-				if err != nil {
-					return err
-				}
-			}
-			jumpHost = selectedHost.ID
-		}
-
-		fmt.Printf("%s Creating tunnel to %s via %s...\n",
-			tui.DimStyle.Render("►"),
-			tui.TextStyle.Render(instance.InstanceID),
-			tui.DimStyle.Render(jumpHost))
-
-		t, err = tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
-			Type:       tunnel.TunnelTypeEC2,
-			LocalPort:  connectLocalPort,
-			RemoteHost: instance.PrivateIP,
-			RemotePort: connectRemotePort,
-			JumpHostID: jumpHost,
-		})
-		if err == nil {
-			registerAutoStopIfECS(t, selectedHost, cfg, discovery)
-		}
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to create tunnel: %w", err)
-	}
-
-	fmt.Println()
-	fmt.Printf("%s Tunnel active\n", tui.SuccessStyle.Render("✓"))
-	fmt.Printf("  %s localhost:%d → %s:%d\n",
-		tui.DimStyle.Render("Port:"),
-		t.LocalPort,
-		instance.PrivateIP,
-		connectRemotePort)
-	fmt.Println()
-	fmt.Println(tui.DimStyle.Render("Press Ctrl+C to disconnect"))
-
-	waitForInterrupt()
-	tunnelMgr.CloseAll()
-	fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
-
-	return nil
+	return connectEC2Instance(ctx, pm, discovery, cfg, instance)
 }
 
 func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
@@ -687,14 +655,20 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 		return err
 	}
 
+	return connectEC2Instance(ctx, pm, discovery, cfg, instance)
+}
+
+// connectEC2Instance handles the shared EC2 connection flow (shell by default,
+// port forwarding with --port-forward, optionally detached) for an already
+// resolved instance.
+func connectEC2Instance(ctx context.Context, pm *aws.ProfileManager, discovery *aws.Discovery, cfg *config.Config, instance *aws.EC2Instance) error {
 	ssmMgr := tunnel.NewSSMManager(pm.GetConfig(), pm.GetCurrentProfile())
 
-	// Determine connection mode: shell is default, unless --port-forward is specified
-	useShell := !connectPortForward
-	
-	// Handle interactive shell mode (default)
-	if useShell {
-		// Shell mode only works with direct SSM connection
+	// Interactive shell mode (default, unless --port-forward)
+	if !connectPortForward {
+		if connectDetach {
+			return fmt.Errorf("--detach requires --port-forward (an interactive shell cannot run in the background)")
+		}
 		if !instance.SSMEnabled {
 			return fmt.Errorf("instance %s is not SSM-enabled. Interactive shell requires SSM", instance.InstanceID)
 		}
@@ -708,81 +682,87 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 		fmt.Println("...")
 		fmt.Println()
 
-		// Start interactive session
 		session, err := ssmMgr.StartInteractiveSession(ctx, instance.InstanceID)
 		if err != nil {
 			return fmt.Errorf("failed to start interactive session: %w", err)
 		}
 
-		// Wait for session to end
 		<-session.Done()
-		
+
 		fmt.Println()
 		fmt.Println(tui.DimStyle.Render("Session closed"))
 		return nil
 	}
 
 	// Port forwarding mode
-	tunnelMgr := tunnel.NewManager(ssmMgr)
-	var t *tunnel.Tunnel
+	localPort, err := resolveLocalPort(connectLocalPort, 0)
+	if err != nil {
+		return err
+	}
+
+	spec := tunnelSpec{
+		Type:       string(tunnel.TunnelTypeEC2),
+		Target:     instance.InstanceID,
+		LocalPort:  localPort,
+		RemotePort: connectRemotePort,
+		Profile:    pm.GetCurrentProfile(),
+	}
+	var selectedHost *aws.JumpHost
 
 	if connectDirect {
-		// Direct SSM connection
 		if !instance.SSMEnabled {
 			return fmt.Errorf("instance %s is not SSM-enabled. Use --via to specify a jump host", instance.InstanceID)
 		}
+		spec.Direct = true
+		spec.TargetID = instance.InstanceID
+	} else {
+		var jumpHost string
+		selectedHost, jumpHost, err = chooseJumpHost(ctx, discovery, cfg)
+		if err != nil {
+			return err
+		}
+		spec.RemoteHost = instance.PrivateIP
+		spec.JumpHostID = jumpHost
+	}
 
+	if connectDetach {
+		applyAutoStop(&spec, selectedHost, cfg)
+		fmt.Printf("%s Starting background tunnel to %s...\n",
+			tui.DimStyle.Render("►"),
+			tui.TextStyle.Render(instance.InstanceID))
+		st, err := spawnDetached(spec)
+		if err != nil {
+			return err
+		}
+		printDetached(st)
+		return nil
+	}
+
+	if spec.Direct {
 		fmt.Printf("%s Creating direct tunnel to %s...\n",
 			tui.DimStyle.Render("►"),
 			tui.TextStyle.Render(instance.InstanceID))
-
-		t, err = tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
-			Type:       tunnel.TunnelTypeEC2,
-			LocalPort:  connectLocalPort,
-			RemotePort: connectRemotePort,
-			Direct:     true,
-			TargetID:   instance.InstanceID,
-		})
 	} else {
-		// Via jump host
-		var selectedHost *aws.JumpHost
-		jumpHost := connectVia
-		if jumpHost == "" {
-			jumpHosts, err := discovery.DiscoverJumpHosts(ctx, cfg)
-			if err != nil || len(jumpHosts) == 0 {
-				return fmt.Errorf("no jump host found. Use --direct if target has SSM, or --via to specify jump host")
-			}
-			if len(jumpHosts) == 1 {
-				selectedHost = &jumpHosts[0]
-			} else {
-				selectedHost, err = tui.SelectJumpHost(jumpHosts)
-				if err != nil {
-					return err
-				}
-			}
-			jumpHost = selectedHost.ID
-		}
-
 		fmt.Printf("%s Creating tunnel to %s via %s...\n",
 			tui.DimStyle.Render("►"),
 			tui.TextStyle.Render(instance.InstanceID),
-			tui.DimStyle.Render(jumpHost))
-
-		t, err = tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
-			Type:       tunnel.TunnelTypeEC2,
-			LocalPort:  connectLocalPort,
-			RemoteHost: instance.PrivateIP,
-			RemotePort: connectRemotePort,
-			JumpHostID: jumpHost,
-		})
-		if err == nil {
-			registerAutoStopIfECS(t, selectedHost, cfg, discovery)
-		}
+			tui.DimStyle.Render(spec.JumpHostID))
 	}
 
+	tunnelMgr := tunnel.NewManager(ssmMgr)
+	t, err := tunnelMgr.CreateTunnel(ctx, tunnel.TunnelConfig{
+		Type:       tunnel.TunnelTypeEC2,
+		LocalPort:  spec.LocalPort,
+		RemoteHost: spec.RemoteHost,
+		RemotePort: spec.RemotePort,
+		JumpHostID: spec.JumpHostID,
+		Direct:     spec.Direct,
+		TargetID:   spec.TargetID,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create tunnel: %w", err)
 	}
+	registerAutoStopIfECS(t, selectedHost, cfg, discovery)
 
 	fmt.Println()
 	fmt.Printf("%s Tunnel active\n", tui.SuccessStyle.Render("✓"))
@@ -794,9 +774,7 @@ func runConnectEC2ByName(cmd *cobra.Command, namePattern string) error {
 	fmt.Println()
 	fmt.Println(tui.DimStyle.Render("Press Ctrl+C to disconnect"))
 
-	waitForInterrupt()
-	tunnelMgr.CloseAll()
-	fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
+	holdTunnel(tunnelMgr, tunnelStateFor(t, instance.InstanceID, pm.GetCurrentProfile()))
 
 	return nil
 }
@@ -903,6 +881,9 @@ func runConnectPreset(cmd *cobra.Command, args []string) error {
 	}
 	if conn.Direct {
 		connectDirect = conn.Direct
+	}
+	if conn.Detach {
+		connectDetach = true
 	}
 
 	// Route to appropriate subcommand
@@ -1018,6 +999,59 @@ func reexecWithGranted(profile string, presetName string) error {
 	// Exit the current process (the re-exec has completed)
 	os.Exit(0)
 	return nil
+}
+
+// tunnelStateFor builds the state-dir record for a foreground tunnel.
+func tunnelStateFor(t *tunnel.Tunnel, target, profile string) state.TunnelState {
+	return state.TunnelState{
+		ID:         t.ID,
+		PID:        os.Getpid(),
+		Type:       string(t.Type),
+		Target:     target,
+		LocalPort:  t.LocalPort,
+		RemoteHost: t.RemoteHost,
+		RemotePort: t.RemotePort,
+		JumpHost:   t.JumpHost,
+		Profile:    profile,
+		StartedAt:  time.Now(),
+	}
+}
+
+// holdTunnel registers a foreground tunnel in the state dir so `tunnelboy
+// tunnels`/`disconnect` can see it, waits for Ctrl+C/SIGTERM, then cleans up.
+func holdTunnel(tunnelMgr *tunnel.Manager, st state.TunnelState) {
+	_ = state.Write(st)
+	waitForInterrupt()
+	_ = state.Remove(st.ID)
+	tunnelMgr.CloseAll()
+	fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
+}
+
+// applyAutoStop copies ECS auto-stop teardown info into a detach spec when the
+// parent auto-started the jump host task and the config asks for teardown.
+func applyAutoStop(spec *tunnelSpec, host *aws.JumpHost, cfg *config.Config) {
+	if host == nil || host.Type != "ecs" || host.StartedTaskARN == "" || host.ClusterName == "" {
+		return
+	}
+	if !cfg.JumpHosts.ECSAutoStop {
+		return
+	}
+	spec.AutoStopCluster = host.ClusterName
+	spec.AutoStopTaskARN = host.StartedTaskARN
+}
+
+// printDetached tells the user how to reach and manage a background tunnel.
+func printDetached(st *state.TunnelState) {
+	fmt.Println()
+	fmt.Printf("%s Tunnel running in background\n", tui.SuccessStyle.Render("✓"))
+	fmt.Printf("  %s %s\n", tui.DimStyle.Render("ID:        "), st.ID)
+	fmt.Printf("  %s localhost:%d\n", tui.DimStyle.Render("Endpoint:  "), st.LocalPort)
+	fmt.Printf("  %s %d\n", tui.DimStyle.Render("PID:       "), st.PID)
+	if st.LogFile != "" {
+		fmt.Printf("  %s %s\n", tui.DimStyle.Render("Log:       "), st.LogFile)
+	}
+	fmt.Println()
+	fmt.Println(tui.DimStyle.Render(fmt.Sprintf("Disconnect with: tunnelboy disconnect %s", st.ID)))
 }
 
 // resolveLocalPort picks the local port to bind. requested is the value of
