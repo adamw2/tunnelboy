@@ -97,6 +97,7 @@ type dashModel struct {
 	// progress is shared with in-flight launch goroutines; the 1Hz tick
 	// re-renders whatever they last reported (ECS auto-start phase, etc.).
 	progress *startProgress
+	frame    int
 }
 
 // startProgress is a tiny thread-safe "latest status line" shared between the
@@ -264,12 +265,19 @@ func (m *dashModel) reload() {
 	}
 }
 
-func dashTick() tea.Cmd {
-	return tea.Tick(time.Second, func(time.Time) tea.Msg { return dashTickMsg{} })
+// tickCmd re-renders at 1Hz normally, faster while a launch is in
+// flight so the wait screen (progress line + mascot) animates.
+func (m dashModel) tickCmd() tea.Cmd {
+	d := time.Second
+	switch m.mode {
+	case modeLaunching, modeDiscovering, modeStarting:
+		d = 300 * time.Millisecond
+	}
+	return tea.Tick(d, func(time.Time) tea.Msg { return dashTickMsg{} })
 }
 
 func (m dashModel) Init() tea.Cmd {
-	return dashTick()
+	return m.tickCmd()
 }
 
 func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -279,8 +287,9 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dashTickMsg:
+		m.frame++
 		m.reload()
-		return m, dashTick()
+		return m, m.tickCmd()
 
 	case stopDoneMsg:
 		switch msg.result {
@@ -810,6 +819,8 @@ func (m dashModel) View() string {
 			status = "working..."
 		}
 		b.WriteString(tui.WarningStyle.Render("  ► " + truncate(status, 90)))
+		b.WriteString("\n\n")
+		b.WriteString(tui.Mascot(m.frame))
 		b.WriteString("\n\n")
 		b.WriteString(tui.DimStyle.Render("  (a cold ECS bastion takes ~30-60s to auto-start)"))
 		b.WriteString("\n")
