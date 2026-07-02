@@ -173,9 +173,11 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 		rdsInstance = selected
 	}
 
-	// Get database user
+	// Get database user. A detached launch without one is fine — the tunnel
+	// doesn't need it, only the IAM token does — so don't block on a prompt
+	// (the dashboard launches with no terminal to prompt on).
 	dbUser := connectDBUser
-	if dbUser == "" {
+	if dbUser == "" && !connectDetach {
 		if connectPrintToken {
 			return fmt.Errorf("--db-user is required when using --print-token")
 		}
@@ -255,6 +257,12 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 		}
 		printDetached(st)
 
+		if dbUser == "" {
+			fmt.Println()
+			fmt.Println(tui.DimStyle.Render(fmt.Sprintf(
+				"IAM token: tunnelboy connect rds %s --print-token --db-user <user>", rdsInstance.Identifier)))
+			return nil
+		}
 		token, err := aws.GenerateRDSAuthToken(ctx, pm.GetConfig(), rdsInstance.Endpoint,
 			int(rdsInstance.Port), pm.GetConfig().Region, dbUser)
 		if err != nil {
