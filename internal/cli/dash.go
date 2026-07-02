@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -90,6 +93,61 @@ type dashModel struct {
 	width     int
 	height    int
 	quitting  bool
+
+	// progress is shared with in-flight launch goroutines; the 1Hz tick
+	// re-renders whatever they last reported (ECS auto-start phase, etc.).
+	progress *startProgress
+}
+
+// startProgress is a tiny thread-safe "latest status line" shared between the
+// UI and launch goroutines.
+type startProgress struct {
+	mu   sync.Mutex
+	text string
+}
+
+func (p *startProgress) set(s string) {
+	p.mu.Lock()
+	p.text = s
+	p.mu.Unlock()
+}
+
+func (p *startProgress) get() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.text
+}
+
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// progressWriter captures a child process's combined output while mirroring
+// its most recent line (the child rewrites one line with \r for ECS progress)
+// into a startProgress for live display.
+type progressWriter struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	prog *startProgress
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf.Write(p)
+	parts := strings.FieldsFunc(w.buf.String(), func(r rune) bool { return r == '\n' || r == '\r' })
+	for i := len(parts) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(ansiRE.ReplaceAllString(parts[i], ""))
+		if line != "" {
+			w.prog.set(line)
+			break
+		}
+	}
+	return len(p), nil
+}
+
+func (w *progressWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 type dashTickMsg struct{}
@@ -151,6 +209,8 @@ func runDash(cmd *cobra.Command, args []string) error {
 	}
 	sort.Slice(presets, func(i, j int) bool { return presets[i].label < presets[j].label })
 	m.newItems = append(presets, dashServices...)
+
+	m.progress = &startProgress{}
 
 	m.reload()
 	// The dashboard doubles as a launcher: with nothing running, open on the
@@ -332,7 +392,8 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if item.preset != "" {
 					m.mode = modeLaunching
 					m.launching = item.preset
-					return m, launchPreset(item.preset)
+					m.progress.set("launching...")
+					return m, launchPreset(item.preset, m.progress)
 				}
 				m.mode = modeDiscovering
 				m.service = item.service
@@ -366,7 +427,8 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.mode = modeStarting
-				return m, resolveJumpCmd(t.spec, m.cfg)
+				m.progress.set("resolving jump host...")
+				return m, resolveJumpCmd(t.spec, m.cfg, m.progress)
 			}
 		case "esc":
 			m.mode = modeNewPick
@@ -392,7 +454,8 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			spec.RemotePort = port
 			m.message = ""
 			m.mode = modeStarting
-			return m, resolveJumpCmd(spec, m.cfg)
+			m.progress.set("resolving jump host...")
+			return m, resolveJumpCmd(spec, m.cfg, m.progress)
 		case key == "esc":
 			m.mode = modeTargetPick
 			m.message = ""
@@ -421,7 +484,9 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				spec := m.pendingSpec
 				m.mode = modeStarting
 				cfg := m.cfg
-				return m, func() tea.Msg { return finishLaunch(spec, &host, cfg) }
+				prog := m.progress
+				prog.set("starting tunnel...")
+				return m, func() tea.Msg { return finishLaunch(spec, &host, cfg, prog) }
 			}
 		case "esc", "q":
 			m.mode = modeList
@@ -470,9 +535,10 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 const launchTimeout = 3 * time.Minute
 
 // launchPreset spawns `tunnelboy connect <preset> --detach` and reports the
-// result. The child parents the actual tunnel runner, so nothing here needs to
-// stay alive after it returns.
-func launchPreset(name string) tea.Cmd {
+// result, streaming the child's latest output line (ECS auto-start progress
+// etc.) into prog for live display. The child parents the actual tunnel
+// runner, so nothing here needs to stay alive after it returns.
+func launchPreset(name string, prog *startProgress) tea.Cmd {
 	return func() tea.Msg {
 		exe, err := os.Executable()
 		if err != nil {
@@ -480,12 +546,15 @@ func launchPreset(name string) tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
 		defer cancel()
+		pw := &progressWriter{prog: prog}
 		cmd := exec.CommandContext(ctx, exe, "connect", name, "--detach") // #nosec G204 -- re-exec of our own binary with a config preset name
-		out, err := cmd.CombinedOutput()
+		cmd.Stdout = pw
+		cmd.Stderr = pw
+		err = cmd.Run()
 		if ctx.Err() != nil {
 			err = fmt.Errorf("timed out — if this preset needs an SSO login, run it in a terminal first: tunnelboy connect %s --detach", name)
 		}
-		return launchDoneMsg{name: name, output: string(out), err: err}
+		return launchDoneMsg{name: name, output: pw.String(), err: err}
 	}
 }
 
@@ -592,7 +661,7 @@ func discoverCmd(service string) tea.Cmd {
 // resolveJumpCmd discovers the jump host for a spec (auto-starting the ECS
 // bastion if needed) and either finishes the launch or asks the user to pick
 // between multiple hosts.
-func resolveJumpCmd(spec tunnelSpec, cfg *config.Config) tea.Cmd {
+func resolveJumpCmd(spec tunnelSpec, cfg *config.Config, prog *startProgress) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), aws.DefaultStartupTimeout+time.Minute)
 		defer cancel()
@@ -602,8 +671,11 @@ func resolveJumpCmd(spec tunnelSpec, cfg *config.Config) tea.Cmd {
 			return startDoneMsg{err: err}
 		}
 		d := aws.NewDiscovery(pm.GetConfig())
-		d.EnableAutoStart(nil) // silent: the dashboard shows its own status line
+		d.EnableAutoStart(func(elapsed time.Duration, status string) {
+			prog.set(fmt.Sprintf("ECS auto-start: %s (%s)", status, elapsed))
+		})
 
+		prog.set("discovering jump hosts...")
 		hosts, err := d.DiscoverJumpHosts(ctx, cfg)
 		if err != nil {
 			return startDoneMsg{err: fmt.Errorf("jump host discovery: %w", err)}
@@ -614,12 +686,12 @@ func resolveJumpCmd(spec tunnelSpec, cfg *config.Config) tea.Cmd {
 		if len(hosts) > 1 {
 			return jumpPickMsg{hosts: hosts, spec: spec}
 		}
-		return finishLaunch(spec, &hosts[0], cfg)
+		return finishLaunch(spec, &hosts[0], cfg, prog)
 	}
 }
 
 // finishLaunch resolves local ports and spawns the detached runner.
-func finishLaunch(spec tunnelSpec, host *aws.JumpHost, cfg *config.Config) tea.Msg {
+func finishLaunch(spec tunnelSpec, host *aws.JumpHost, cfg *config.Config, prog *startProgress) tea.Msg {
 	spec.JumpHostID = host.ID
 	applyAutoStop(&spec, host, cfg)
 
@@ -636,6 +708,7 @@ func finishLaunch(spec tunnelSpec, host *aws.JumpHost, cfg *config.Config) tea.M
 		return startDoneMsg{err: err}
 	}
 
+	prog.set(fmt.Sprintf("starting tunnel process on localhost:%d...", spec.userPort()))
 	st, err := spawnDetached(spec)
 	return startDoneMsg{st: st, err: err}
 }
@@ -703,7 +776,7 @@ func (m dashModel) View() string {
 	b.WriteString("\n\n")
 
 	switch m.mode {
-	case modeNewPick, modeLaunching:
+	case modeNewPick:
 		m.viewNewPick(&b)
 	case modeDiscovering:
 		b.WriteString(tui.TitleStyle.Render("DISCOVERING"))
@@ -721,12 +794,24 @@ func (m dashModel) View() string {
 		b.WriteString("\n")
 	case modeJumpPick:
 		m.viewJumpHosts(&b)
-	case modeStarting:
+	case modeStarting, modeLaunching:
+		what := m.launching
+		if m.mode == modeStarting {
+			what = m.pendingTargetLabel()
+		}
 		b.WriteString(tui.TitleStyle.Render("STARTING TUNNEL"))
 		b.WriteString("\n")
-		b.WriteString(tui.DimStyle.Render("  Resolving jump host and starting tunnel..."))
-		b.WriteString("\n")
-		b.WriteString(tui.DimStyle.Render("  (may auto-start an ECS bastion — up to ~1 min)"))
+		if what != "" {
+			b.WriteString(tui.TextStyle.Render("  " + what))
+			b.WriteString("\n\n")
+		}
+		status := m.progress.get()
+		if status == "" {
+			status = "working..."
+		}
+		b.WriteString(tui.WarningStyle.Render("  ► " + truncate(status, 90)))
+		b.WriteString("\n\n")
+		b.WriteString(tui.DimStyle.Render("  (a cold ECS bastion takes ~30-60s to auto-start)"))
 		b.WriteString("\n")
 	default:
 		m.viewTunnels(&b)
@@ -745,7 +830,7 @@ func (m dashModel) View() string {
 	case modeNewPick:
 		hints = "↑↓ Navigate • Enter Launch/Discover • Esc Back • q Quit"
 	case modeLaunching:
-		hints = fmt.Sprintf("Starting %s... (may auto-start a bastion, ~30s)", m.launching)
+		hints = fmt.Sprintf("Starting %s...", m.launching)
 	case modeDiscovering:
 		hints = "Esc Cancel"
 	case modeTargetPick:
@@ -769,6 +854,17 @@ func (m dashModel) selectedID() string {
 		return m.tunnels[m.cursor].ID
 	}
 	return "?"
+}
+
+// pendingTargetLabel names what's being started in the discovery flow.
+func (m dashModel) pendingTargetLabel() string {
+	if m.pendingSpec.Target != "" {
+		return m.pendingSpec.Target
+	}
+	if m.targetCursor < len(m.targets) {
+		return m.targets[m.targetCursor].spec.Target
+	}
+	return ""
 }
 
 func (m dashModel) viewTunnels(b *strings.Builder) {
