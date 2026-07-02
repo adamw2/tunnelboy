@@ -41,9 +41,19 @@ tasks:
     cmds:
       - GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "{{.LDFLAGS}}" -o bin/tunnelboy_darwin_arm64 ./cmd/tunnelboy
 
+  build-linux-amd64:
+    desc: Build for Linux x86_64
+    cmds:
+      - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "{{.LDFLAGS}}" -o bin/tunnelboy_linux_amd64 ./cmd/tunnelboy
+
+  build-linux-arm64:
+    desc: Build for Linux ARM64
+    cmds:
+      - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "{{.LDFLAGS}}" -o bin/tunnelboy_linux_arm64 ./cmd/tunnelboy
+
   build-all:
-    desc: Build for all macOS architectures
-    deps: [build-darwin-amd64, build-darwin-arm64]
+    desc: Build for all supported platforms
+    deps: [build-darwin-amd64, build-darwin-arm64, build-linux-amd64, build-linux-arm64]
 
   clean:
     desc: Remove build artifacts
@@ -137,4 +147,6 @@ tasks:
       - mkdir -p dist
       - cd bin && tar -czvf ../dist/tunnelboy_darwin_amd64.tar.gz tunnelboy_darwin_amd64
       - cd bin && tar -czvf ../dist/tunnelboy_darwin_arm64.tar.gz tunnelboy_darwin_arm64
+      - cd bin && tar -czvf ../dist/tunnelboy_linux_amd64.tar.gz tunnelboy_linux_amd64
+      - cd bin && tar -czvf ../dist/tunnelboy_linux_arm64.tar.gz tunnelboy_linux_arm64
       - cd dist && sha256sum *.tar.gz > checksums.txt

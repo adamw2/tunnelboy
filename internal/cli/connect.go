@@ -23,6 +23,8 @@ var (
 	connectVia          string
 	connectDirect       bool
 	connectDBUser       string
+	connectDBName       string
+	connectExec         bool
 	connectKibanaPort   int
 	connectPrintToken   bool
 	connectShell        bool
@@ -89,9 +91,11 @@ func init() {
 	connectRDSCmd.Flags().StringVar(&connectVia, "via", "", "jump host instance ID")
 	connectRDSCmd.Flags().StringVar(&connectDBUser, "db-user", "", "database user for IAM auth")
 	connectRDSCmd.Flags().BoolVar(&connectPrintToken, "print-token", false, "print only the IAM token and exit")
+	connectRDSCmd.Flags().BoolVar(&connectExec, "exec", false, "launch psql/mysql through the tunnel with the IAM token")
+	connectRDSCmd.Flags().StringVar(&connectDBName, "db-name", "", "database name (for --exec)")
 
 	// OpenSearch flags
-	connectOpenSearchCmd.Flags().IntVar(&connectLocalPort, "local-port", 9250, "local port for API (Chrome blocks 9200)")
+	connectOpenSearchCmd.Flags().IntVar(&connectLocalPort, "local-port", 0, "local port for API (default 9250; Chrome blocks 9200)")
 	connectOpenSearchCmd.Flags().IntVar(&connectKibanaPort, "kibana-port", 5601, "local port for Kibana")
 	connectOpenSearchCmd.Flags().StringVar(&connectVia, "via", "", "jump host instance ID")
 
@@ -213,9 +217,9 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	ssmMgr := tunnel.NewSSMManager(pm.GetConfig(), pm.GetCurrentProfile())
 	tunnelMgr := tunnel.NewManager(ssmMgr)
 
-	localPort := connectLocalPort
-	if localPort == 0 {
-		localPort = int(rdsInstance.Port) // Use same port as RDS
+	localPort, err := resolveLocalPort(connectLocalPort, int(rdsInstance.Port))
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("%s Creating tunnel to %s...\n",
@@ -256,7 +260,7 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("%s Tunnel active\n", tui.SuccessStyle.Render("✓"))
 	fmt.Println()
-	
+
 	// Connection details
 	fmt.Println(tui.TitleStyle.Render("Connection Details"))
 	fmt.Printf("  %s localhost\n", tui.DimStyle.Render("Host:      "))
@@ -264,7 +268,19 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  %s %s\n", tui.DimStyle.Render("Database:  "), rdsInstance.Identifier)
 	fmt.Printf("  %s %s\n", tui.DimStyle.Render("User:      "), tui.TextStyle.Render(dbUser))
 	fmt.Println()
-	
+
+	// --exec: hand the session to the DB client; tunnel closes when it exits
+	if connectExec {
+		if token == "<failed-to-generate>" {
+			tunnelMgr.CloseAll()
+			return fmt.Errorf("cannot use --exec: IAM token generation failed")
+		}
+		clientErr := runDBClient(rdsInstance.Engine, dbUser, connectDBName, t.LocalPort, token)
+		tunnelMgr.CloseAll()
+		fmt.Println(tui.DimStyle.Render("\nTunnel closed"))
+		return clientErr
+	}
+
 	// IAM Token
 	fmt.Println(tui.TitleStyle.Render("IAM Authentication Token"))
 	fmt.Println(tui.DimStyle.Render("Use this as your password (valid for 15 minutes):"))
@@ -371,14 +387,20 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 	ssmMgr := tunnel.NewSSMManager(pm.GetConfig(), pm.GetCurrentProfile())
 	tunnelMgr := tunnel.NewManager(ssmMgr)
 
-	// Set default local port if not specified (user-facing proxy port)
-	localPort := connectLocalPort
-	if localPort == 0 {
-		localPort = 9250 // Default to 9250 (Chrome blocks 9200)
+	// User-facing proxy port (default 9250 — Chrome blocks 9200)
+	localPort, err := resolveLocalPort(connectLocalPort, 9250)
+	if err != nil {
+		return err
 	}
 
-	// Calculate tunnel port (internal, higher port)
+	// Internal tunnel port behind the proxy
 	tunnelPort := localPort + 50
+	if !tunnel.PortAvailable(tunnelPort) {
+		tunnelPort, err = tunnel.FindFreePort()
+		if err != nil {
+			return fmt.Errorf("failed to find free port: %w", err)
+		}
+	}
 
 	fmt.Printf("%s Creating tunnel to %s...\n",
 		tui.DimStyle.Render("►"),
@@ -889,6 +911,12 @@ func runConnectPreset(cmd *cobra.Command, args []string) error {
 		if conn.DBUser != "" {
 			connectDBUser = conn.DBUser
 		}
+		if conn.DBName != "" {
+			connectDBName = conn.DBName
+		}
+		if conn.Exec {
+			connectExec = true
+		}
 		return runConnectRDS(cmd, []string{conn.Identifier})
 	
 	case "opensearch":
@@ -922,7 +950,16 @@ func runConnectPreset(cmd *cobra.Command, args []string) error {
 		}
 		
 		return fmt.Errorf("EC2 preset %q must specify either 'instance' or 'name_pattern'", presetName)
-	
+
+	case "redis", "elasticache":
+		return runConnectEndpoint(elastiCacheKind, []string{conn.Identifier})
+
+	case "docdb":
+		return runConnectEndpoint(docDBKind, []string{conn.Identifier})
+
+	case "msk", "kafka":
+		return runConnectEndpoint(mskKind, []string{conn.Identifier})
+
 	default:
 		return fmt.Errorf("unknown connection type %q for preset %q", conn.Type, presetName)
 	}
@@ -981,6 +1018,30 @@ func reexecWithGranted(profile string, presetName string) error {
 	// Exit the current process (the re-exec has completed)
 	os.Exit(0)
 	return nil
+}
+
+// resolveLocalPort picks the local port to bind. requested is the value of
+// --local-port (0 = not set, use fallback). An explicitly requested port that
+// is busy is an error; a busy fallback silently degrades to a free port with
+// a notice, since the user expressed no preference.
+func resolveLocalPort(requested, fallback int) (int, error) {
+	if requested != 0 {
+		if !tunnel.PortAvailable(requested) {
+			return 0, fmt.Errorf("local port %d is already in use (pick another with --local-port, or omit the flag to auto-assign)", requested)
+		}
+		return requested, nil
+	}
+	if fallback != 0 && tunnel.PortAvailable(fallback) {
+		return fallback, nil
+	}
+	port, err := tunnel.FindFreePort()
+	if err != nil {
+		return 0, fmt.Errorf("failed to find free port: %w", err)
+	}
+	if fallback != 0 {
+		fmt.Printf("%s Port %d is in use, using %d instead\n", tui.WarningStyle.Render("⚠"), fallback, port)
+	}
+	return port, nil
 }
 
 func waitForInterrupt() {

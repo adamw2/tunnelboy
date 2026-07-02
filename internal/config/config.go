@@ -70,6 +70,8 @@ type Connection struct {
 	NamePattern    string `mapstructure:"name_pattern"`    // EC2 name pattern (alternative to instance)
 	Domain         string `mapstructure:"domain"`          // OpenSearch domain name
 	DBUser         string `mapstructure:"db_user"`         // Database user for RDS
+	DBName         string `mapstructure:"db_name"`         // Database name (for exec)
+	Exec           bool   `mapstructure:"exec"`            // Launch DB client after connecting (RDS)
 	AWSProfile     string `mapstructure:"aws_profile"`     // AWS profile to use for this connection
 	ConnectionType string `mapstructure:"connection_type"` // shell or port_forward (for EC2, default: shell)
 	LocalPort      int    `mapstructure:"local_port"`

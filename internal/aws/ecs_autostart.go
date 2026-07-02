@@ -300,10 +300,13 @@ func emit(p ProgressFunc, start time.Time, status string) {
 	p(time.Since(start).Round(time.Second), status)
 }
 
+// nextBackoff caps at 2s: DescribeTasks is free and low-rate, and a longer
+// interval just adds dead time between the task becoming exec-ready and us
+// noticing (up to a full interval per cold start).
 func nextBackoff(cur time.Duration) time.Duration {
 	next := cur + time.Second
-	if next > 5*time.Second {
-		return 5 * time.Second
+	if next > 2*time.Second {
+		return 2 * time.Second
 	}
 	return next
 }
