@@ -97,6 +97,7 @@ func init() {
 	connectRDSCmd.Flags().BoolVar(&connectExec, "exec", false, "launch psql/mysql through the tunnel with the IAM token")
 	connectRDSCmd.Flags().StringVar(&connectDBName, "db-name", "", "database name (for --exec)")
 	connectRDSCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
+	connectCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background (for presets)")
 
 	connectOpenSearchCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
 	connectEC2Cmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background (port-forward mode only)")
@@ -973,9 +974,15 @@ func reexecWithGranted(profile string, presetName string) error {
 	}
 
 	// Build the shell command to invoke Granted's assume function
-	// We need to source the shell init files to get the assume alias/function
-	shellCmd := fmt.Sprintf("source ~/.zshenv 2>/dev/null; source ~/.zshrc 2>/dev/null; assume %s --exec -- %s connect %s",
-		profile, tunnelboyPath, presetName)
+	// We need to source the shell init files to get the assume alias/function.
+	// Propagate --detach so a background launch stays a background launch
+	// through the re-exec (the dashboard depends on this).
+	detachFlag := ""
+	if connectDetach {
+		detachFlag = " --detach"
+	}
+	shellCmd := fmt.Sprintf("source ~/.zshenv 2>/dev/null; source ~/.zshrc 2>/dev/null; assume %s --exec -- %s connect %s%s",
+		profile, tunnelboyPath, presetName, detachFlag)
 
 	// Create command - invoke through shell. profile and presetName are validated
 	// against safeNamePattern above; tunnelboyPath is from os.Executable, not user
@@ -1019,8 +1026,16 @@ func tunnelStateFor(t *tunnel.Tunnel, target, profile string) state.TunnelState 
 
 // holdTunnel registers a foreground tunnel in the state dir so `tunnelboy
 // tunnels`/`disconnect` can see it, waits for Ctrl+C/SIGTERM, then cleans up.
+// Status transitions (reconnecting/active/disconnected) are mirrored into the
+// state file so the dashboard shows real health.
 func holdTunnel(tunnelMgr *tunnel.Manager, st state.TunnelState) {
+	st.Status = "active"
 	_ = state.Write(st)
+	tunnelMgr.SetStatusCallback(func(_, status string) {
+		st.Status = status
+		st.UpdatedAt = time.Now()
+		_ = state.Write(st)
+	})
 	waitForInterrupt()
 	_ = state.Remove(st.ID)
 	tunnelMgr.CloseAll()

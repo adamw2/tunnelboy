@@ -63,20 +63,24 @@ func runTunnels(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"ID", "Type", "Target", "Local Port", "Profile", "Mode", "Uptime"})
+	table.SetHeader([]string{"ID", "Type", "Target", "Local Port", "Profile", "Mode", "Status", "Uptime"})
 	table.SetBorder(false)
-	setGreenTableColors(table, 7)
+	setGreenTableColors(table, 8)
 
 	for _, t := range tunnels {
 		mode := "foreground"
 		if t.Detached {
 			mode = "background"
 		}
+		status := t.Status
+		if status == "" {
+			status = "active"
+		}
 		uptime := time.Since(t.StartedAt).Round(time.Second).String()
 		table.Append([]string{
 			t.ID, t.Type, t.Target,
 			fmt.Sprintf("%d", t.LocalPort),
-			t.Profile, mode, uptime,
+			t.Profile, mode, status, uptime,
 		})
 	}
 	table.Render()
@@ -132,34 +136,50 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// disconnectTunnel sends SIGTERM to the owning process (triggering its normal
-// close path: SSM teardown, ECS auto-stop hooks, state removal) and escalates
-// to SIGKILL if it doesn't clean up in time.
-func disconnectTunnel(t *state.TunnelState) error {
-	fmt.Printf("%s Closing tunnel %s (pid %d)...\n", tui.DimStyle.Render("►"), t.ID, t.PID)
+// stopResult describes how a tunnel process was brought down.
+type stopResult int
 
+const (
+	stopClean stopResult = iota // exited on SIGTERM, close hooks ran
+	stopStale                   // process was already dead, record removed
+	stopKilled                  // SIGKILL escalation, close hooks may not have run
+)
+
+// stopTunnelProcess sends SIGTERM to the owning process (triggering its normal
+// close path: SSM teardown, ECS auto-stop hooks, state removal) and escalates
+// to SIGKILL if it doesn't clean up in time. Silent — callers render the result.
+func stopTunnelProcess(t *state.TunnelState) stopResult {
 	if err := state.Signal(t, syscall.SIGTERM); err != nil {
-		// Process already gone: just clear the record.
 		_ = state.Remove(t.ID)
-		fmt.Printf("%s Tunnel %s was already dead, removed stale record\n", tui.WarningStyle.Render("⚠"), t.ID)
-		return nil
+		return stopStale
 	}
 
 	deadline := time.Now().Add(disconnectTimeout)
 	for time.Now().Before(deadline) {
 		if !state.IsAlive(t.PID) {
 			_ = state.Remove(t.ID) // in case the process died before its cleanup
-			fmt.Printf("%s Tunnel %s closed\n", tui.SuccessStyle.Render("✓"), t.ID)
-			return nil
+			return stopClean
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Escalate. Close hooks (e.g. ECS auto-stop) are skipped by SIGKILL, so say so.
 	_ = state.Signal(t, syscall.SIGKILL)
 	_ = state.Remove(t.ID)
-	fmt.Printf("%s Tunnel %s force-killed after %s (close hooks may not have run)\n",
-		tui.WarningStyle.Render("⚠"), t.ID, disconnectTimeout)
+	return stopKilled
+}
+
+func disconnectTunnel(t *state.TunnelState) error {
+	fmt.Printf("%s Closing tunnel %s (pid %d)...\n", tui.DimStyle.Render("►"), t.ID, t.PID)
+
+	switch stopTunnelProcess(t) {
+	case stopStale:
+		fmt.Printf("%s Tunnel %s was already dead, removed stale record\n", tui.WarningStyle.Render("⚠"), t.ID)
+	case stopKilled:
+		fmt.Printf("%s Tunnel %s force-killed after %s (close hooks may not have run)\n",
+			tui.WarningStyle.Render("⚠"), t.ID, disconnectTimeout)
+	default:
+		fmt.Printf("%s Tunnel %s closed\n", tui.SuccessStyle.Render("✓"), t.ID)
+	}
 	return nil
 }
 

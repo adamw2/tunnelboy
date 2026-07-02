@@ -27,7 +27,9 @@ type TunnelState struct {
 	JumpHost   string    `json:"jump_host,omitempty"`
 	Profile    string    `json:"profile,omitempty"`
 	Detached   bool      `json:"detached"`
+	Status     string    `json:"status,omitempty"` // active, reconnecting, disconnected
 	StartedAt  time.Time `json:"started_at"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 	LogFile    string    `json:"log_file,omitempty"`
 }
 

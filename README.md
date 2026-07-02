@@ -183,6 +183,19 @@ Not available for interactive modes: EC2 shell (use `--port-forward`) and
 
 Presets can set `detach: true` to always background a connection.
 
+### Dashboard
+
+```bash
+tunnelboy dash        # aliases: ui, dashboard
+```
+
+A live Pip-Boy dashboard of every tunnel: target, endpoint, profile, real
+status (active / reconnecting / down, reported by the tunnel processes
+themselves), uptime, and a log pane for the selected tunnel. Keys: `↑↓`
+select, `d` disconnect (with confirm), `n` launch a preset in the background,
+`q` quit. With no tunnels running it opens straight into the preset launcher,
+so `dash` works as the front door to the tool.
+
 ### EC2 Interactive Shell
 
 EC2 connections default to interactive shell mode. Port forwarding is opt-in with `--port-forward`.

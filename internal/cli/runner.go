@@ -141,6 +141,7 @@ func runTunnelRunner(cmd *cobra.Command, args []string) error {
 		JumpHost:   spec.JumpHostID,
 		Profile:    pm.GetCurrentProfile(),
 		Detached:   true,
+		Status:     "active",
 		StartedAt:  time.Now(),
 	}
 	if dir, err := state.LogDir(); err == nil {
@@ -153,6 +154,12 @@ func runTunnelRunner(cmd *cobra.Command, args []string) error {
 		_ = tunnelMgr.CloseAll()
 		return fmt.Errorf("write state: %w", err)
 	}
+
+	tunnelMgr.SetStatusCallback(func(_, status string) {
+		st.Status = status
+		st.UpdatedAt = time.Now()
+		_ = state.Write(st)
+	})
 
 	fmt.Fprintf(os.Stderr, "tunnel %s ready on localhost:%d (pid %d)\n", st.ID, st.LocalPort, st.PID)
 
