@@ -82,9 +82,30 @@ func (t *Tunnel) setSession(s *SSMSession) {
 
 // Manager manages active tunnels
 type Manager struct {
-	tunnels map[string]*Tunnel
-	mu      sync.RWMutex
-	ssmMgr  *SSMManager
+	tunnels  map[string]*Tunnel
+	mu       sync.RWMutex
+	ssmMgr   *SSMManager
+	onStatus func(id, status string)
+}
+
+// SetStatusCallback registers a callback fired on tunnel status transitions
+// (active, reconnecting, disconnected). Used to keep the tunnel's state file
+// current so `tunnels` and the dashboard can show real health.
+func (m *Manager) SetStatusCallback(fn func(id, status string)) {
+	m.mu.Lock()
+	m.onStatus = fn
+	m.mu.Unlock()
+}
+
+// setStatus updates a tunnel's status and notifies the callback.
+func (m *Manager) setStatus(t *Tunnel, status string) {
+	t.Status = status
+	m.mu.RLock()
+	fn := m.onStatus
+	m.mu.RUnlock()
+	if fn != nil {
+		fn(t.ID, status)
+	}
 }
 
 // NewManager creates a new tunnel manager
@@ -315,7 +336,7 @@ func (m *Manager) monitorTunnel(ctx context.Context, tunnel *Tunnel) {
 			return
 		}
 
-		tunnel.Status = "reconnecting"
+		m.setStatus(tunnel, "reconnecting")
 		fmt.Fprintf(os.Stderr, "\n⚠ Tunnel %s disconnected, reconnecting...\n", tunnel.ID)
 
 		wait := reconnectInitialWait
@@ -330,7 +351,7 @@ func (m *Manager) monitorTunnel(ctx context.Context, tunnel *Tunnel) {
 			}
 			if err == nil {
 				tunnel.setSession(newSession)
-				tunnel.Status = "active"
+				m.setStatus(tunnel, "active")
 				fmt.Fprintf(os.Stderr, "✓ Tunnel %s reconnected (localhost:%d)\n", tunnel.ID, tunnel.LocalPort)
 				reconnected = true
 				break
@@ -338,7 +359,7 @@ func (m *Manager) monitorTunnel(ctx context.Context, tunnel *Tunnel) {
 
 			if aws.IsCredentialError(err) {
 				fmt.Fprintf(os.Stderr, "✗ Tunnel %s cannot reconnect: %s\n", tunnel.ID, aws.CredentialHint(m.ssmMgr.Profile()))
-				tunnel.Status = "disconnected"
+				m.setStatus(tunnel, "disconnected")
 				return
 			}
 
@@ -361,7 +382,7 @@ func (m *Manager) monitorTunnel(ctx context.Context, tunnel *Tunnel) {
 		}
 
 		if !reconnected {
-			tunnel.Status = "disconnected"
+			m.setStatus(tunnel, "disconnected")
 			return
 		}
 	}
