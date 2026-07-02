@@ -1,6 +1,6 @@
 # TunnelBoy
 
-AWS VPC tunneling CLI with Pip-Boy theming. Securely connect to RDS databases, OpenSearch clusters, and EC2 instances through SSM Session Manager.
+AWS VPC tunneling CLI with Pip-Boy theming. Securely connect to RDS databases, OpenSearch clusters, EC2 instances, ElastiCache, DocumentDB, and MSK through SSM Session Manager.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -20,21 +20,27 @@ AWS VPC tunneling CLI with Pip-Boy theming. Securely connect to RDS databases, O
 ## Features
 
 - **AWS SSO Support**: Works with your existing AWS profiles and SSO sessions
-- **Service Discovery**: Automatically discovers RDS instances, OpenSearch domains, and EC2 instances
+- **Service Discovery**: Automatically discovers RDS instances, OpenSearch domains, EC2 instances, ElastiCache clusters, DocumentDB clusters, and MSK clusters
 - **Flexible Jump Hosts**: Configure jump hosts by name patterns, tags, or explicit IDs
 - **Direct SSM**: Connect directly to SSM-enabled instances without a jump host
 - **OpenSearch Proxy**: Automatic SigV4 signing proxy for browser-based Kibana/OpenSearch Dashboard access
 - **RDS IAM Auth**: Generate temporary credentials for IAM-authenticated databases
+- **Client Launch**: `connect rds --exec` opens psql/mysql through the tunnel with the IAM token injected
+- **Auto-Reconnect**: Dropped SSM sessions reconnect automatically with backoff; expired credentials produce a clear "run assume" hint instead of an SDK stack trace
+- **Team Config**: Commit a `.tunnelboy.yaml` to a repo; it merges over your personal `~/.tunnelboy.yaml`
+- **Diagnostics**: `tunnelboy doctor` checks your setup end to end
 - **Interactive TUI**: Beautiful Pip-Boy themed interface for selecting resources
 
 ## Prerequisites
 
-- macOS (Intel or Apple Silicon)
+- macOS (Intel or Apple Silicon) or Linux (x86_64 or ARM64)
 - AWS CLI configured with profiles
 - [Session Manager Plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 
 ```bash
+# macOS
 brew install --cask session-manager-plugin
+# Linux: see the AWS docs link above for distro packages
 ```
 
 ## Installation
@@ -67,8 +73,14 @@ tunnelboy connect rds my-database --db-user readonly --local-port 5432
 tunnelboy connect opensearch my-domain
 # Then open http://localhost:9250/_dashboards in your browser
 
+# Connect and drop straight into psql/mysql with the IAM token
+tunnelboy connect rds my-database --db-user readonly --exec
+
 # Open interactive shell on an EC2 instance (default behavior)
 tunnelboy connect ec2 i-0abc123def
+
+# Check your setup
+tunnelboy doctor
 ```
 
 ## Usage
@@ -88,6 +100,9 @@ tunnelboy list jump-hosts           # List discovered jump hosts
 tunnelboy list rds                  # List RDS instances
 tunnelboy list opensearch           # List OpenSearch domains
 tunnelboy list ec2                  # List EC2 instances (shows SSM status)
+tunnelboy list redis                # List ElastiCache clusters
+tunnelboy list docdb                # List DocumentDB clusters
+tunnelboy list msk                  # List MSK clusters
 tunnelboy list all                  # List everything
 ```
 
@@ -108,9 +123,40 @@ tunnelboy connect ec2 <instance-id>                # Open shell on instance (def
 tunnelboy connect ec2 <instance-id> --port-forward --remote-port 8080  # Port forwarding mode
 tunnelboy connect ec2 <instance-id> --direct       # Direct SSM (no jump host)
 
+# RDS with client launch: opens psql/mysql through the tunnel, IAM token injected
+tunnelboy connect rds <identifier> --db-user <user> --exec
+tunnelboy connect rds <identifier> --db-user <user> --db-name mydb --exec
+
+# ElastiCache (Redis/Valkey/Memcached)
+tunnelboy connect redis                            # Interactive selection
+tunnelboy connect redis my-cluster --local-port 6379
+
+# DocumentDB
+tunnelboy connect docdb my-cluster
+
+# MSK (tunnels to the first bootstrap broker; good for connectivity checks)
+tunnelboy connect msk my-cluster
+
 # Using a specific jump host
 tunnelboy connect rds my-db --via i-0abc123def456
 ```
+
+### Diagnostics
+
+```bash
+tunnelboy doctor
+```
+
+Checks the Session Manager plugin, AWS profiles, credential validity (with a
+clear hint when your SSO session has expired), loaded config files, jump host
+discovery, and the optional psql/mysql clients used by `--exec`.
+
+### Auto-Reconnect
+
+If an SSM session drops (idle timeout, max session duration, network change),
+TunnelBoy reconnects automatically with exponential backoff, up to 5 attempts.
+If reconnection fails because your credentials expired, it tells you exactly
+what to run instead of retrying forever.
 
 ### Tunnel Management
 
@@ -206,6 +252,12 @@ tunnelboy connect bastion-shell
 
 Create `~/.tunnelboy.yaml` for persistent settings. See [.tunnelboy.yaml.example](.tunnelboy.yaml.example) for a full example.
 
+**Project-local config:** TunnelBoy also looks for a `.tunnelboy.yaml` in the
+current directory (walking up toward your home directory) and merges it over
+your personal config, with the project file winning on conflicts. Commit one to
+a repo to share jump host settings and connection presets with your team while
+everyone keeps their own `default_profile`.
+
 Example configuration:
 
 ```yaml
@@ -236,6 +288,20 @@ connections:
     identifier: prod-analytics-postgres
     db_user: readonly
     local_port: 5432
+    exec: true          # optional: launch psql/mysql after connecting
+    db_name: analytics  # optional: database name for exec
+
+  cache:
+    type: redis         # ElastiCache (also: elasticache)
+    identifier: prod-cache
+
+  documents:
+    type: docdb
+    identifier: prod-docdb
+
+  events:
+    type: msk           # also: kafka
+    identifier: prod-events
 
   logs:
     type: opensearch
@@ -452,6 +518,9 @@ tunnelboy connect ec2 <TAB>
 
 ## Troubleshooting
 
+Start with `tunnelboy doctor` — it checks the Session Manager plugin, AWS
+profiles, credentials, config files, and jump host discovery in one shot.
+
 ### OpenSearch/Kibana Access
 
 **Browser shows "Connection Refused"**
@@ -503,7 +572,7 @@ task build
 # Run tests
 task test
 
-# Build for all macOS architectures
+# Build for all supported platforms (macOS + Linux)
 task build-all
 
 # Install for development (creates symlink)

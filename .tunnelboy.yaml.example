@@ -1,5 +1,8 @@
 # TunnelBoy Configuration
 # Save this as ~/.tunnelboy.yaml
+#
+# A .tunnelboy.yaml in a project directory (searched upward from the cwd) is
+# merged over ~/.tunnelboy.yaml — commit one to share presets with your team.
 
 # Default AWS profile (fallback if AWS_PROFILE is not set)
 # Priority: 1. --profile CLI flag, 2. AWS_PROFILE env var, 3. this default_profile
@@ -47,6 +50,8 @@ connections:
     aws_profile: production  # Optional: validates you're on the correct profile
     local_port: 5432
     via: i-0abc123def456789  # Optional: pin to specific jump host
+    exec: true               # Optional: launch psql/mysql after connecting
+    db_name: analytics       # Optional: database name for exec
 
   staging-mysql:
     type: rds
@@ -110,12 +115,21 @@ connections:
     name_pattern: "bastion"
     connection_type: shell  # Open interactive shell on selected bastion
 
-  # MongoDB/DocumentDB example
+  # DocumentDB example
   prod-mongo:
-    type: rds  # DocumentDB is treated as RDS
+    type: docdb
     identifier: prod-documentdb
-    db_user: app_reader
     local_port: 27017
+
+  # ElastiCache example (Redis/Valkey/Memcached; aliases: elasticache)
+  prod-cache:
+    type: redis
+    identifier: prod-cache-cluster
+
+  # MSK example (alias: kafka) — tunnels to the first bootstrap broker
+  prod-events:
+    type: msk
+    identifier: prod-events-cluster
 
 # Example usage:
 # tunnelboy connect prod-analytics

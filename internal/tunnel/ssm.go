@@ -32,6 +32,11 @@ func NewSSMManager(cfg aws.Config, profile string) *SSMManager {
 	}
 }
 
+// Profile returns the AWS profile this manager was created with
+func (m *SSMManager) Profile() string {
+	return m.profile
+}
+
 // SSMSession represents an active SSM session
 type SSMSession struct {
 	SessionID string

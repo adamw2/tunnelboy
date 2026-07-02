@@ -106,6 +106,32 @@ func SelectEC2(instances []aws.EC2Instance) (*aws.EC2Instance, error) {
 	return nil, fmt.Errorf("selection cancelled")
 }
 
+// SelectEndpoint prompts user to select a generic endpoint target
+// (ElastiCache, DocumentDB, MSK)
+func SelectEndpoint(title string, targets []aws.EndpointTarget) (*aws.EndpointTarget, error) {
+	items := make([]list.Item, len(targets))
+	for i, t := range targets {
+		items[i] = Item{
+			id:          t.Name,
+			title:       t.Name,
+			description: t.Detail,
+		}
+	}
+
+	selected, err := runSelector(title, items)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, t := range targets {
+		if t.Name == selected {
+			return &t, nil
+		}
+	}
+
+	return nil, fmt.Errorf("selection cancelled")
+}
+
 // SelectJumpHost prompts user to select a jump host
 func SelectJumpHost(jumpHosts []aws.JumpHost) (*aws.JumpHost, error) {
 	items := make([]list.Item, len(jumpHosts))

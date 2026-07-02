@@ -305,6 +305,18 @@ func runListAll(cmd *cobra.Command, args []string) error {
 	if err := runListEC2(cmd, args); err != nil {
 		fmt.Println(tui.ErrorStyle.Render("EC2: " + err.Error()))
 	}
+	fmt.Println()
+	if err := runListEndpoints("ElastiCache", elastiCacheKind.discover); err != nil {
+		fmt.Println(tui.ErrorStyle.Render("ElastiCache: " + err.Error()))
+	}
+	fmt.Println()
+	if err := runListEndpoints("DocumentDB", docDBKind.discover); err != nil {
+		fmt.Println(tui.ErrorStyle.Render("DocumentDB: " + err.Error()))
+	}
+	fmt.Println()
+	if err := runListEndpoints("MSK", mskKind.discover); err != nil {
+		fmt.Println(tui.ErrorStyle.Render("MSK: " + err.Error()))
+	}
 	return nil
 }
 
