@@ -1,6 +1,6 @@
 module github.com/adamw2/tunnelboy
 
-go 1.24.0
+go 1.25.0
 
 toolchain go1.26.4
 
@@ -10,6 +10,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.4.14
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.170.0
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.44.0
+	github.com/aws/aws-sdk-go-v2/service/elasticache v1.54.5
+	github.com/aws/aws-sdk-go-v2/service/kafka v1.54.2
 	github.com/aws/aws-sdk-go-v2/service/opensearch v1.40.0
 	github.com/aws/aws-sdk-go-v2/service/rds v1.80.0
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.52.0
@@ -20,6 +22,7 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
+	golang.org/x/term v0.44.0
 	gopkg.in/ini.v1 v1.67.0
 )
 
@@ -30,10 +33,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/elasticache v1.54.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.16 // indirect
-	github.com/aws/aws-sdk-go-v2/service/kafka v1.54.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.0.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.12 // indirect
@@ -76,7 +77,7 @@ require (
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

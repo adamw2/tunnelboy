@@ -2,12 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/term"
 	"github.com/adamw2/tunnelboy/internal/aws"
 )
 
@@ -247,7 +249,17 @@ func SetVersion(v string) {
 	versionInfo.Version = v
 }
 
+// IsInteractive reports whether stdin/stdout are attached to a terminal.
+// Selectors and prompts cannot run without one (e.g. when tunnelboy is
+// spawned by the dashboard or a script).
+func IsInteractive() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
 func runSelector(title string, items []list.Item) (string, error) {
+	if !IsInteractive() {
+		return "", fmt.Errorf("%q needs interactive selection but there is no terminal — narrow the request so only one option matches, or run from a terminal", title)
+	}
 	// Custom delegate with Pip-Boy styling
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
@@ -301,6 +313,12 @@ func min(a, b int) int {
 
 // PromptInput prompts for text input
 func PromptInput(prompt, defaultValue string) (string, error) {
+	if !IsInteractive() {
+		if defaultValue != "" {
+			return defaultValue, nil
+		}
+		return "", fmt.Errorf("%q needs terminal input but there is no terminal — pass the value via flag or preset", prompt)
+	}
 	ti := textinput.New()
 	ti.Placeholder = defaultValue
 	ti.Focus()
