@@ -70,9 +70,19 @@ jobs:
           shasum -a 256 tunnelboy_*.tar.gz > checksums.txt
           cat checksums.txt
 
+      # Use the annotated tag message as the release body; GitHub appends the
+      # auto-generated PR list after it. Lightweight tags produce an empty
+      # body, leaving just the generated notes — same as before.
+      - name: Extract tag annotation
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-body.md
+          cat release-body.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          body_path: release-body.md
           files: |
             tunnelboy_darwin_amd64.tar.gz
             tunnelboy_darwin_arm64.tar.gz
