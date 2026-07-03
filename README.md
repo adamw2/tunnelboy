@@ -288,6 +288,23 @@ your personal config, with the project file winning on conflicts. Commit one to
 a repo to share jump host settings and connection presets with your team while
 everyone keeps their own `default_profile`.
 
+**Company-wide config:** To share presets that work from any directory, put a
+`.tunnelboy.yaml` at the root of a git repo and have everyone run:
+
+```bash
+tunnelboy config sync git@github.com:yourorg/tunnelboy-config.git
+```
+
+The repo is cloned into `~/.tunnelboy/shared/` and its config is loaded on
+every run. Re-run `tunnelboy config sync` (no arguments) any time to pull
+updates for all synced repos. You can also list extra config files under
+`includes:` in `~/.tunnelboy.yaml`.
+
+Merge precedence, lowest to highest: synced shared repos → `includes:` files →
+`~/.tunnelboy.yaml` → project-local `.tunnelboy.yaml`. Your personal settings
+always override shared ones. `tunnelboy doctor` shows every file loaded, in
+order.
+
 Example configuration:
 
 ```yaml

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -75,7 +76,7 @@ func init() {
 }
 
 // loadedConfigFiles records which config files were read, for `doctor` and
-// debugging. Order: home config first, project config (merged on top) second.
+// debugging, in merge order (lowest precedence first).
 var loadedConfigFiles []string
 
 func initConfig() {
@@ -97,25 +98,80 @@ func initConfig() {
 		return
 	}
 
-	// Home config first (ignore if not found)
-	viper.AddConfigPath(home)
-	viper.SetConfigType("yaml")
-	viper.SetConfigName(".tunnelboy")
-	if err := viper.ReadInConfig(); err == nil {
-		loadedConfigFiles = append(loadedConfigFiles, viper.ConfigFileUsed())
+	// Layered config, lowest precedence first: synced shared repos, then
+	// files listed under `includes:` in the home config, then the home
+	// config itself, then the nearest project-local config. Later layers
+	// override earlier ones, so personal settings beat shared ones and
+	// project settings beat both.
+	homeCfg := homeConfigFile(home)
+	var layers []string
+	layers = append(layers, sharedConfigs(home)...)
+	layers = append(layers, includedConfigs(homeCfg, home)...)
+	if homeCfg != "" {
+		layers = append(layers, homeCfg)
+	}
+	if projectCfg := findProjectConfig(home); projectCfg != "" {
+		layers = append(layers, projectCfg)
 	}
 
-	// Project-local config: nearest .tunnelboy.yaml walking up from the
-	// working directory, merged over the home config so teams can commit
-	// shared presets while users keep personal defaults.
-	if projectCfg := findProjectConfig(home); projectCfg != "" {
-		viper.SetConfigFile(projectCfg)
+	viper.SetConfigType("yaml")
+	for _, f := range layers {
+		viper.SetConfigFile(f)
 		if err := viper.MergeInConfig(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not read project config %s: %v\n", projectCfg, err)
-		} else {
-			loadedConfigFiles = append(loadedConfigFiles, projectCfg)
+			fmt.Fprintf(os.Stderr, "Warning: could not read config %s: %v\n", f, err)
+			continue
+		}
+		loadedConfigFiles = append(loadedConfigFiles, f)
+	}
+}
+
+// homeConfigFile returns the user's home config path, or "" if none exists.
+func homeConfigFile(home string) string {
+	for _, name := range []string{".tunnelboy.yaml", ".tunnelboy.yml"} {
+		p := filepath.Join(home, name)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
 		}
 	}
+	return ""
+}
+
+// sharedConfigs returns the .tunnelboy.yaml of every repo synced into
+// ~/.tunnelboy/shared/ (see `tunnelboy config sync`), sorted by repo name.
+func sharedConfigs(home string) []string {
+	matches, err := filepath.Glob(filepath.Join(home, ".tunnelboy", "shared", "*", ".tunnelboy.yaml"))
+	if err != nil {
+		return nil
+	}
+	return matches
+}
+
+// includedConfigs returns existing files listed under `includes:` in the
+// home config. Entries support ~ expansion; relative paths resolve from
+// the home directory.
+func includedConfigs(homeCfg, home string) []string {
+	if homeCfg == "" {
+		return nil
+	}
+	v := viper.New()
+	v.SetConfigFile(homeCfg)
+	if err := v.ReadInConfig(); err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range v.GetStringSlice("includes") {
+		if strings.HasPrefix(p, "~/") {
+			p = filepath.Join(home, p[2:])
+		} else if !filepath.IsAbs(p) {
+			p = filepath.Join(home, p)
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			out = append(out, p)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: included config %s not found\n", p)
+		}
+	}
+	return out
 }
 
 // findProjectConfig walks up from the working directory looking for

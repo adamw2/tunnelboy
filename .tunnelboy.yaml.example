@@ -3,6 +3,13 @@
 #
 # A .tunnelboy.yaml in a project directory (searched upward from the cwd) is
 # merged over ~/.tunnelboy.yaml — commit one to share presets with your team.
+#
+# Company-wide config: `tunnelboy config sync <git-url>` clones a repo whose
+# root .tunnelboy.yaml is loaded on every run, BELOW this file so your
+# personal settings win. Re-run `tunnelboy config sync` to pull updates.
+# You can also point at extra config files explicitly:
+# includes:
+#   - ~/repos/tunnelboy-config/company.yaml
 
 # Default AWS profile (fallback if AWS_PROFILE is not set)
 # Priority: 1. --profile CLI flag, 2. AWS_PROFILE env var, 3. this default_profile
