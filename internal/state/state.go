@@ -20,7 +20,8 @@ type TunnelState struct {
 	ID         string    `json:"id"`
 	PID        int       `json:"pid"`
 	Type       string    `json:"type"`
-	Target     string    `json:"target"` // human-readable (RDS identifier, domain, instance ID...)
+	Engine     string    `json:"engine,omitempty"` // rds/elasticache engine (postgres, mysql, redis...)
+	Target     string    `json:"target"`           // human-readable (RDS identifier, domain, instance ID...)
 	LocalPort  int       `json:"local_port"`
 	RemoteHost string    `json:"remote_host,omitempty"`
 	RemotePort int       `json:"remote_port,omitempty"`

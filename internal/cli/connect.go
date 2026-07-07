@@ -1022,6 +1022,7 @@ func tunnelStateFor(t *tunnel.Tunnel, target, profile string) state.TunnelState 
 		ID:         t.ID,
 		PID:        os.Getpid(),
 		Type:       string(t.Type),
+		Engine:     t.Engine,
 		Target:     target,
 		LocalPort:  t.LocalPort,
 		RemoteHost: t.RemoteHost,

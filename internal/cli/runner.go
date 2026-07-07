@@ -134,6 +134,7 @@ func runTunnelRunner(cmd *cobra.Command, args []string) error {
 		ID:         spec.stateID(),
 		PID:        os.Getpid(),
 		Type:       spec.Type,
+		Engine:     spec.Engine,
 		Target:     spec.Target,
 		LocalPort:  spec.userPort(),
 		RemoteHost: spec.RemoteHost,

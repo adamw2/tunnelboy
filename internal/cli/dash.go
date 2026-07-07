@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -527,6 +528,15 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.tunnels) > 0 {
 				m.mode = modeConfirm
 			}
+		case "c":
+			if m.cursor < len(m.tunnels) {
+				url := connectionString(m.tunnels[m.cursor])
+				if err := clipboard.WriteAll(url); err != nil {
+					m.message = "✗ clipboard: " + err.Error()
+				} else {
+					m.message = "✓ copied " + url
+				}
+			}
 		case "n":
 			m.mode = modeNewPick
 			m.newCursor = 0
@@ -731,6 +741,33 @@ func silentLocalPort(fallback int) (int, error) {
 	return tunnel.FindFreePort()
 }
 
+// connectionString builds a pasteable client URL for a tunnel. The engine (for
+// rds/elasticache) picks the scheme; tunnels recorded before the engine field
+// existed, and types without a URL scheme, fall back to plain host:port.
+func connectionString(st state.TunnelState) string {
+	switch st.Type {
+	case string(tunnel.TunnelTypeRDS):
+		switch {
+		case strings.Contains(st.Engine, "postgres"):
+			return fmt.Sprintf("postgresql://localhost:%d/", st.LocalPort)
+		case strings.Contains(st.Engine, "mysql"), strings.Contains(st.Engine, "mariadb"):
+			return fmt.Sprintf("mysql://localhost:%d/", st.LocalPort)
+		}
+	case string(tunnel.TunnelTypeOpenSearch):
+		// The local SigV4 proxy speaks plain HTTP.
+		return fmt.Sprintf("http://localhost:%d", st.LocalPort)
+	case string(tunnel.TunnelTypeElastiCache):
+		if !strings.Contains(st.Engine, "memcached") {
+			return fmt.Sprintf("redis://localhost:%d", st.LocalPort)
+		}
+	case string(tunnel.TunnelTypeDocDB):
+		// Same parameters as the `connect docdb` client hint; DocDB requires
+		// TLS with the RDS CA bundle, and the cert won't match localhost.
+		return fmt.Sprintf("mongodb://localhost:%d/?tls=true&tlsAllowInvalidHostnames=true&directConnection=true&retryWrites=false", st.LocalPort)
+	}
+	return fmt.Sprintf("localhost:%d", st.LocalPort)
+}
+
 // tailLines returns the last n non-blank lines of a file.
 func tailLines(path string, n int) []string {
 	data, err := os.ReadFile(path) // #nosec G304 -- log path recorded by our own tunnel processes under ~/.tunnelboy
@@ -853,7 +890,7 @@ func (m dashModel) View() string {
 	case modeStarting:
 		hints = "Starting..."
 	default:
-		hints = "↑↓ Select • [d] Disconnect • [n] New • [r] Refresh • [q] Quit"
+		hints = "↑↓ Select • [c] Copy URL • [d] Disconnect • [n] New • [r] Refresh • [q] Quit"
 	}
 	b.WriteString(tui.RenderStatusBar(hints))
 

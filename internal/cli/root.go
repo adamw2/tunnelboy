@@ -32,9 +32,12 @@ Securely connect to RDS databases, OpenSearch clusters, and EC2
 instances through SSM Session Manager.
 
 Example:
+  tunnelboy                          # Open the live dashboard
   tunnelboy connect rds              # Interactive RDS selection
-  tunnelboy connect opensearch       # Interactive OpenSearch selection  
+  tunnelboy connect opensearch       # Interactive OpenSearch selection
   tunnelboy list all                 # List all discoverable resources`,
+	Args:         cobra.NoArgs,
+	RunE:         runDash,
 	SilenceUsage: true,
 }
 

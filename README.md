@@ -186,15 +186,17 @@ Presets can set `detach: true` to always background a connection.
 ### Dashboard
 
 ```bash
+tunnelboy             # bare invocation opens the dashboard
 tunnelboy dash        # aliases: ui, dashboard
 ```
 
 A live Pip-Boy dashboard of every tunnel: target, endpoint, profile, real
 status (active / reconnecting / down, reported by the tunnel processes
 themselves), uptime, and a log pane for the selected tunnel. Keys: `↑↓`
-select, `d` disconnect (with confirm), `n` launch a preset in the background,
-`q` quit. With no tunnels running it opens straight into the preset launcher,
-so `dash` works as the front door to the tool.
+select, `c` copy a client URL for the selected tunnel to the clipboard,
+`d` disconnect (with confirm), `n` launch a preset in the background,
+`q` quit. With no tunnels running it opens straight into the preset launcher, so a
+bare `tunnelboy` works as the front door to the tool.
 
 ### EC2 Interactive Shell
 
