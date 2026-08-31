@@ -194,8 +194,10 @@ A live Pip-Boy dashboard of every tunnel: target, endpoint, profile, real
 status (active / reconnecting / down, reported by the tunnel processes
 themselves), uptime, and a log pane for the selected tunnel. Keys: `↑↓`
 select, `c` copy a client URL for the selected tunnel to the clipboard,
-`d` disconnect (with confirm), `n` launch a preset in the background,
-`q` quit. With no tunnels running it opens straight into the preset launcher, so a
+`t` mint a fresh RDS IAM auth token for the selected tunnel and copy it to the
+clipboard (prompts for the database user, prefilled from the matching preset's
+`db_user`), `d` disconnect (with confirm), `n` launch a preset in the
+background, `q` quit. With no tunnels running it opens straight into the preset launcher, so a
 bare `tunnelboy` works as the front door to the tool.
 
 ### EC2 Interactive Shell
