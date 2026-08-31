@@ -2,7 +2,7 @@ module github.com/adamw2/tunnelboy
 
 go 1.25.0
 
-toolchain go1.26.4
+toolchain go1.26.6
 
 require (
 	github.com/atotto/clipboard v0.1.4
