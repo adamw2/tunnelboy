@@ -49,6 +49,8 @@ const (
 	modePortInput   // EC2: enter remote port
 	modeJumpPick    // multiple jump hosts: pick one
 	modeStarting    // spawnDetached in flight
+	modeDBUserInput // RDS: enter the DB user to mint an IAM token for
+	modeTokenGen    // IAM token generation in flight
 )
 
 // newItem is one row of the launcher: either a config preset (launched via
@@ -85,6 +87,11 @@ type dashModel struct {
 
 	pendingSpec tunnelSpec
 	portBuf     string
+
+	// tokenTunnel is the tunnel an IAM token is being minted for; dbUserBuf is
+	// the user being typed for it.
+	tokenTunnel state.TunnelState
+	dbUserBuf   string
 
 	cfg       *config.Config
 	mode      dashMode
@@ -174,6 +181,10 @@ type jumpPickMsg struct {
 type startDoneMsg struct {
 	st  *state.TunnelState
 	err error
+}
+type tokenDoneMsg struct {
+	user string
+	err  error
 }
 
 const dashLogLines = 8
@@ -356,6 +367,15 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reload()
 		return m, nil
 
+	case tokenDoneMsg:
+		m.mode = modeList
+		if msg.err != nil {
+			m.message = fmt.Sprintf("✗ IAM token failed: %v", msg.err)
+		} else {
+			m.message = fmt.Sprintf("✓ IAM token for %s copied to clipboard (valid 15 min)", msg.user)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -503,7 +523,31 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case modeLaunching, modeDiscovering, modeStarting:
+	case modeDBUserInput:
+		switch {
+		case key == "enter":
+			user := strings.TrimSpace(m.dbUserBuf)
+			if user == "" {
+				m.message = "database user required"
+				return m, nil
+			}
+			m.message = ""
+			m.mode = modeTokenGen
+			return m, tokenCmd(m.tokenTunnel, user)
+		case key == "esc":
+			m.mode = modeList
+			m.message = ""
+		case key == "backspace":
+			if len(m.dbUserBuf) > 0 {
+				m.dbUserBuf = m.dbUserBuf[:len(m.dbUserBuf)-1]
+			}
+		// Printable, non-space ASCII only — DB usernames have no spaces.
+		case len(key) == 1 && key[0] > ' ' && key[0] < 0x7f && len(m.dbUserBuf) < 63:
+			m.dbUserBuf += key
+		}
+		return m, nil
+
+	case modeLaunching, modeDiscovering, modeStarting, modeTokenGen:
 		if key == "esc" && m.mode == modeDiscovering {
 			m.mode = modeNewPick // result will be ignored
 		}
@@ -536,6 +580,18 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					m.message = "✓ copied " + url
 				}
+			}
+		case "t":
+			if m.cursor < len(m.tunnels) {
+				t := m.tunnels[m.cursor]
+				if t.Type != string(tunnel.TunnelTypeRDS) {
+					m.message = "IAM tokens apply to RDS tunnels only"
+					return m, nil
+				}
+				m.tokenTunnel = t
+				m.dbUserBuf = presetDBUser(m.cfg, t.Target)
+				m.message = ""
+				m.mode = modeDBUserInput
 			}
 		case "n":
 			m.mode = modeNewPick
@@ -574,6 +630,47 @@ func launchPreset(name string, prog *startProgress) tea.Cmd {
 			err = fmt.Errorf("timed out — if this preset needs an SSO login, run it in a terminal first: tunnelboy connect %s --detach", name)
 		}
 		return launchDoneMsg{name: name, output: pw.String(), err: err}
+	}
+}
+
+// presetDBUser returns the db_user of the config preset pointing at this RDS
+// identifier, so the common case needs no typing. Empty when nothing matches.
+func presetDBUser(cfg *config.Config, target string) string {
+	if cfg == nil {
+		return ""
+	}
+	for _, conn := range cfg.Connections {
+		if conn.Identifier == target && conn.DBUser != "" {
+			return conn.DBUser
+		}
+	}
+	return ""
+}
+
+// tokenCmd mints a fresh RDS IAM auth token for a live tunnel and copies it to
+// the clipboard. Tokens last ~15 minutes, so they're generated on demand here
+// rather than recorded at launch, where they'd be stale by first use.
+func tokenCmd(st state.TunnelState, dbUser string) tea.Cmd {
+	return func() tea.Msg {
+		if st.RemoteHost == "" || st.RemotePort == 0 {
+			return tokenDoneMsg{err: fmt.Errorf("tunnel %s has no recorded RDS endpoint", st.ID)}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		pm := aws.NewProfileManager()
+		if err := pm.LoadProfile(ctx, st.Profile); err != nil {
+			return tokenDoneMsg{err: err}
+		}
+		token, err := aws.GenerateRDSAuthToken(ctx, pm.GetConfig(),
+			st.RemoteHost, st.RemotePort, pm.GetConfig().Region, dbUser)
+		if err != nil {
+			return tokenDoneMsg{err: err}
+		}
+		if err := clipboard.WriteAll(token); err != nil {
+			return tokenDoneMsg{err: fmt.Errorf("clipboard: %w", err)}
+		}
+		return tokenDoneMsg{user: dbUser}
 	}
 }
 
@@ -840,6 +937,19 @@ func (m dashModel) View() string {
 		b.WriteString("\n")
 	case modeJumpPick:
 		m.viewJumpHosts(&b)
+	case modeDBUserInput:
+		b.WriteString(tui.TitleStyle.Render("IAM TOKEN"))
+		b.WriteString("\n")
+		b.WriteString(tui.TextStyle.Render(fmt.Sprintf("  Database user for %s: %s_",
+			m.tokenTunnel.Target, m.dbUserBuf)))
+		b.WriteString("\n")
+		b.WriteString(tui.DimStyle.Render("  The token is copied to your clipboard — use it as the password."))
+		b.WriteString("\n")
+	case modeTokenGen:
+		b.WriteString(tui.TitleStyle.Render("IAM TOKEN"))
+		b.WriteString("\n")
+		b.WriteString(tui.DimStyle.Render(fmt.Sprintf("  Generating token for %s...", m.tokenTunnel.Target)))
+		b.WriteString("\n")
 	case modeStarting, modeLaunching:
 		what := m.launching
 		if m.mode == modeStarting {
@@ -889,8 +999,12 @@ func (m dashModel) View() string {
 		hints = "↑↓ Navigate • Enter Select Jump Host • Esc Cancel"
 	case modeStarting:
 		hints = "Starting..."
+	case modeDBUserInput:
+		hints = "Type user • Enter Generate Token • Esc Cancel"
+	case modeTokenGen:
+		hints = "Generating IAM token..."
 	default:
-		hints = "↑↓ Select • [c] Copy URL • [d] Disconnect • [n] New • [r] Refresh • [q] Quit"
+		hints = "↑↓ Select • [c] Copy URL • [t] IAM Token • [d] Disconnect • [n] New • [r] Refresh • [q] Quit"
 	}
 	b.WriteString(tui.RenderStatusBar(hints))
 
