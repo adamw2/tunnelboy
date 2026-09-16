@@ -117,6 +117,10 @@ tunnelboy connect rds <identifier> --db-user <user> --local-port 5432
 tunnelboy connect opensearch                       # Interactive selection
 tunnelboy connect opensearch <domain> --local-port 9250
 
+# A resource in another account (see "Cross-account targets")
+tunnelboy connect opensearch <name> --endpoint <host>
+tunnelboy connect rds <name> --endpoint <host>:5432 --db-user <user>
+
 # EC2 (interactive shell is default)
 tunnelboy connect ec2                              # Interactive selection → shell
 tunnelboy connect ec2 <instance-id>                # Open shell on instance (default)
@@ -282,6 +286,38 @@ tunnelboy connect bastion-shell
 - Works with both `shell` and `port_forward` modes
 - Can specify `aws_profile` for automatic profile switching
 
+## Cross-account targets
+
+Discovery is a control-plane call in the account that owns the resource, so it
+cannot reach across an account boundary. Forwarding a socket can. `--endpoint`
+names the target directly and skips discovery, which lets a tunnel land on a
+resource in an account you hold no credentials for:
+
+```bash
+tunnelboy connect opensearch latest-pes-os \
+  --endpoint vpc-latest-pes-os-abc123.us-east-1.es.amazonaws.com
+```
+
+The jump host is still discovered in the profile's own account, and the signing
+proxy still signs as that profile against the real hostname, so `curl
+http://localhost:9250` and OpenSearch Dashboards in a browser both work
+unchanged. The positional argument is only a display name; the flag carries the
+address.
+
+For RDS the port has no sensible default without discovery, so give it as
+`host:port`, and add `--engine` if you want `--exec`:
+
+```bash
+tunnelboy connect rds latest-pes-db \
+  --endpoint latest-pes-db.abc123.us-east-1.rds.amazonaws.com:3306 \
+  --db-user agent --engine mysql
+```
+
+Two things this does not do. The target's resource policy still has to accept
+the principal you are signing as, and IAM database authentication still has to
+grant the database user. Naming an endpoint changes where the packets go, not
+who you are.
+
 ## Configuration
 
 Create `~/.tunnelboy.yaml` for persistent settings. See [.tunnelboy.yaml.example](.tunnelboy.yaml.example) for a full example.
@@ -328,6 +364,13 @@ connections:
   cache:
     type: redis         # ElastiCache (also: elasticache)
     identifier: prod-cache
+
+  # A domain in another account: the jump host is found in this profile's
+  # account, the endpoint is named rather than discovered.
+  records:
+    type: opensearch
+    domain: latest-pes-os
+    endpoint: vpc-latest-pes-os-abc123.us-east-1.es.amazonaws.com
 
   documents:
     type: docdb

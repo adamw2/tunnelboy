@@ -32,6 +32,8 @@ var (
 	connectShell        bool
 	connectPortForward  bool
 	connectDetach       bool
+	connectEndpoint     string
+	connectEngine       string
 )
 
 var connectCmd = &cobra.Command{
@@ -97,6 +99,8 @@ func init() {
 	connectRDSCmd.Flags().BoolVar(&connectExec, "exec", false, "launch psql/mysql through the tunnel with the IAM token")
 	connectRDSCmd.Flags().StringVar(&connectDBName, "db-name", "", "database name (for --exec)")
 	connectRDSCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
+	connectRDSCmd.Flags().StringVar(&connectEndpoint, "endpoint", "", "target host:port, skipping discovery (for an instance in another account)")
+	connectRDSCmd.Flags().StringVar(&connectEngine, "engine", "", "database engine, needed with --endpoint for --exec (mysql, postgres)")
 	connectCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background (for presets)")
 
 	connectOpenSearchCmd.Flags().BoolVar(&connectDetach, "detach", false, "run the tunnel in the background")
@@ -106,6 +110,7 @@ func init() {
 	connectOpenSearchCmd.Flags().IntVar(&connectLocalPort, "local-port", 0, "local port for API (default 9250; Chrome blocks 9200)")
 	connectOpenSearchCmd.Flags().IntVar(&connectKibanaPort, "kibana-port", 5601, "local port for Kibana")
 	connectOpenSearchCmd.Flags().StringVar(&connectVia, "via", "", "jump host instance ID")
+	connectOpenSearchCmd.Flags().StringVar(&connectEndpoint, "endpoint", "", "target host[:port], skipping discovery (for a domain in another account)")
 
 	// EC2 flags
 	connectEC2Cmd.Flags().IntVar(&connectLocalPort, "local-port", 0, "local port (default: auto)")
@@ -141,7 +146,23 @@ func runConnectRDS(cmd *cobra.Command, args []string) error {
 	// Get RDS instance
 	var rdsInstance *aws.RDSInstance
 
-	if len(args) > 0 {
+	override, err := parseEndpointOverride(connectEndpoint, firstArg(args), 0)
+	if err != nil {
+		return err
+	}
+
+	if override != nil {
+		// Named rather than discovered, so this works for an instance in an
+		// account the profile cannot call DescribeDBInstances in. The IAM auth
+		// token is still minted with these credentials against the real
+		// hostname, which is what the database checks.
+		rdsInstance = &aws.RDSInstance{
+			Identifier: override.Name,
+			Endpoint:   override.Host,
+			Port:       override.Port,
+			Engine:     connectEngine,
+		}
+	} else if len(args) > 0 {
 		// Direct identifier provided
 		instances, err := discovery.DiscoverRDSInstances(ctx)
 		if err != nil {
@@ -388,7 +409,18 @@ func runConnectOpenSearch(cmd *cobra.Command, args []string) error {
 	// Get OpenSearch domain
 	var domain *aws.OpenSearchDomain
 
-	if len(args) > 0 {
+	override, err := parseEndpointOverride(connectEndpoint, firstArg(args), 443)
+	if err != nil {
+		return err
+	}
+
+	if override != nil {
+		// Named rather than discovered, so this works for a domain in an
+		// account the profile cannot call DescribeDomain in. The jump host is
+		// still found in this account, and the proxy still signs with these
+		// credentials against the real hostname.
+		domain = &aws.OpenSearchDomain{DomainName: override.Name, Endpoint: override.Host}
+	} else if len(args) > 0 {
 		domains, err := discovery.DiscoverOpenSearchDomains(ctx)
 		if err != nil {
 			return err
@@ -907,11 +939,20 @@ func runConnectPreset(cmd *cobra.Command, args []string) error {
 		if conn.Exec {
 			connectExec = true
 		}
+		if conn.Endpoint != "" {
+			connectEndpoint = conn.Endpoint
+		}
+		if conn.Engine != "" {
+			connectEngine = conn.Engine
+		}
 		return runConnectRDS(cmd, []string{conn.Identifier})
 	
 	case "opensearch":
 		if conn.KibanaPort > 0 {
 			connectKibanaPort = conn.KibanaPort
+		}
+		if conn.Endpoint != "" {
+			connectEndpoint = conn.Endpoint
 		}
 		return runConnectOpenSearch(cmd, []string{conn.Domain})
 	
