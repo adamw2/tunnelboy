@@ -69,6 +69,8 @@ type Connection struct {
 	Instance       string `mapstructure:"instance"`        // EC2 instance ID
 	NamePattern    string `mapstructure:"name_pattern"`    // EC2 name pattern (alternative to instance)
 	Domain         string `mapstructure:"domain"`          // OpenSearch domain name
+	Endpoint       string `mapstructure:"endpoint"`        // Target host[:port], skipping discovery (resource in another account)
+	Engine         string `mapstructure:"engine"`          // Database engine, needed with endpoint for exec
 	DBUser         string `mapstructure:"db_user"`         // Database user for RDS
 	DBName         string `mapstructure:"db_name"`         // Database name (for exec)
 	Exec           bool   `mapstructure:"exec"`            // Launch DB client after connecting (RDS)
