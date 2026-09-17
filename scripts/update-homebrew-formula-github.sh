@@ -16,13 +16,19 @@ echo "Updating Homebrew formula for version ${VERSION}..."
 # instead of silently saving an error page, and --retry to wait for the asset.
 curl -fL --retry 5 --retry-delay 5 --retry-all-errors "${REPO_URL}/tunnelboy_darwin_amd64.tar.gz" -o tunnelboy_darwin_amd64.tar.gz
 curl -fL --retry 5 --retry-delay 5 --retry-all-errors "${REPO_URL}/tunnelboy_darwin_arm64.tar.gz" -o tunnelboy_darwin_arm64.tar.gz
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "${REPO_URL}/tunnelboy_linux_amd64.tar.gz" -o tunnelboy_linux_amd64.tar.gz
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "${REPO_URL}/tunnelboy_linux_arm64.tar.gz" -o tunnelboy_linux_arm64.tar.gz
 
 # Calculate SHA256 for each archive
 SHA_AMD64=$(shasum -a 256 tunnelboy_darwin_amd64.tar.gz | awk '{print $1}')
 SHA_ARM64=$(shasum -a 256 tunnelboy_darwin_arm64.tar.gz | awk '{print $1}')
+SHA_LINUX_AMD64=$(shasum -a 256 tunnelboy_linux_amd64.tar.gz | awk '{print $1}')
+SHA_LINUX_ARM64=$(shasum -a 256 tunnelboy_linux_arm64.tar.gz | awk '{print $1}')
 
-echo "SHA256 (amd64): ${SHA_AMD64}"
-echo "SHA256 (arm64): ${SHA_ARM64}"
+echo "SHA256 (darwin amd64): ${SHA_AMD64}"
+echo "SHA256 (darwin arm64): ${SHA_ARM64}"
+echo "SHA256 (linux amd64):  ${SHA_LINUX_AMD64}"
+echo "SHA256 (linux arm64):  ${SHA_LINUX_ARM64}"
 
 # Clone homebrew tap repo
 echo "Cloning tap repository..."
@@ -51,7 +57,15 @@ class Tunnelboy < Formula
     end
   end
 
-  depends_on :macos
+  on_linux do
+    if Hardware::CPU.arm?
+      url "${REPO_URL}/tunnelboy_linux_arm64.tar.gz"
+      sha256 "${SHA_LINUX_ARM64}"
+    else
+      url "${REPO_URL}/tunnelboy_linux_amd64.tar.gz"
+      sha256 "${SHA_LINUX_AMD64}"
+    end
+  end
 
   def install
     bin.install "tunnelboy"
@@ -60,13 +74,17 @@ class Tunnelboy < Formula
   def caveats
     <<~EOS
       TunnelBoy requires the AWS Session Manager plugin:
-        brew install --cask session-manager-plugin
+        macOS: brew install --cask session-manager-plugin
+        Linux: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
 
-      To enable shell completion (copy and paste):
+      To enable zsh completion (copy and paste):
         grep -qxF 'autoload -Uz compinit && compinit' ~/.zshrc || echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
         mkdir -p ~/.zsh/completions && tunnelboy completion zsh > ~/.zsh/completions/_tunnelboy
         grep -qxF 'fpath=(~/.zsh/completions \$fpath)' ~/.zshrc || echo 'fpath=(~/.zsh/completions \$fpath)' >> ~/.zshrc
         source ~/.zshrc
+
+      To enable bash completion:
+        echo 'source <(tunnelboy completion bash)' >> ~/.bashrc
 
       Get started:
         tunnelboy profile list
