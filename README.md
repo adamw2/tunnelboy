@@ -216,6 +216,11 @@ clipboard (prompts for the database user, prefilled from the matching preset's
 background, `q` quit. With no tunnels running it opens straight into the preset launcher, so a
 bare `tunnelboy` works as the front door to the tool.
 
+Launching a discovered target (not a saved preset) prompts for the local port
+to bind, pre-filled from `default_local_ports` in your config (or the tunnel's
+typical port if unset) — accept it or type another, e.g. to run several
+tunnels at once or avoid a port you're already using locally.
+
 ### EC2 Interactive Shell
 
 EC2 connections default to interactive shell mode. Port forwarding is opt-in with `--port-forward`.
@@ -370,6 +375,13 @@ connections:
     connection_type: port_forward  # Use port forwarding
     remote_port: 50100
     local_port: 50100
+
+# Default local ports offered at the dashboard's local-port prompt when
+# launching a discovered (non-preset) target, keyed by tunnel type. A type
+# with no entry falls back to its typical port (the remote port itself, or
+# 9250 for opensearch).
+default_local_ports:
+  rds: 3307  # avoid clashing with a local MySQL/Postgres on 3306/5432
 ```
 
 **Connection Descriptions:**

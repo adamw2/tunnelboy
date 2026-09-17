@@ -168,6 +168,27 @@ func stopTunnelProcess(t *state.TunnelState) stopResult {
 	return stopKilled
 }
 
+// killUnmanagedSession sends SIGTERM to pid — an untracked session-manager-
+// plugin process discovered via lsof, not one TunnelBoy started — and
+// escalates to SIGKILL if it doesn't exit in time. No state file to remove:
+// TunnelBoy never owned this process.
+func killUnmanagedSession(pid int) stopResult {
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		return stopStale
+	}
+
+	deadline := time.Now().Add(disconnectTimeout)
+	for time.Now().Before(deadline) {
+		if !state.IsAlive(pid) {
+			return stopClean
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	return stopKilled
+}
+
 func disconnectTunnel(t *state.TunnelState) error {
 	fmt.Printf("%s Closing tunnel %s (pid %d)...\n", tui.DimStyle.Render("►"), t.ID, t.PID)
 
