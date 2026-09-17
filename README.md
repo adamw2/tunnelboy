@@ -45,14 +45,30 @@ brew install --cask session-manager-plugin
 
 ## Installation
 
+### Homebrew (macOS or Linux, including WSL)
+
 ```bash
-# Via Homebrew
 brew tap adamw2/tunnelboy
 brew install tunnelboy
 
 # Verify installation
 tunnelboy version
 ```
+
+On Linux and WSL this needs [Homebrew on Linux](https://docs.brew.sh/Homebrew-on-Linux).
+
+### Linux tarball (no Homebrew)
+
+Prebuilt binaries for `linux_amd64` and `linux_arm64` are attached to every [GitHub release](https://github.com/adamw2/tunnelboy/releases). WSL users want `linux_amd64`.
+
+```bash
+ARCH=amd64  # or arm64
+curl -fL "https://github.com/adamw2/tunnelboy/releases/latest/download/tunnelboy_linux_${ARCH}.tar.gz" | tar -xz
+sudo install -m 755 tunnelboy /usr/local/bin/tunnelboy
+tunnelboy version
+```
+
+Install the Session Manager plugin from the AWS `.deb`/`.rpm` linked under Prerequisites. On WSL, keep your AWS config and SSO login inside the Linux filesystem rather than the Windows side.
 
 ## Quick Start
 
