@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"net"
+	"os/exec"
+	"strconv"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/adamw2/tunnelboy/internal/config"
 	"github.com/adamw2/tunnelboy/internal/state"
+	"github.com/adamw2/tunnelboy/internal/tunnel"
 )
 
 func TestConnectionString(t *testing.T) {
@@ -197,6 +201,207 @@ func TestDashDBUserInput(t *testing.T) {
 	})
 }
 
+func TestDefaultLocalPort(t *testing.T) {
+	cfg := &config.Config{DefaultLocalPorts: map[string]int{"rds": 3307}}
+
+	t.Run("configured default wins", func(t *testing.T) {
+		spec := tunnelSpec{Type: "rds", RemotePort: 5432}
+		if got := defaultLocalPort(spec, cfg); got != 3307 {
+			t.Errorf("got %d, want 3307", got)
+		}
+	})
+
+	t.Run("falls back to remote port when unconfigured", func(t *testing.T) {
+		spec := tunnelSpec{Type: "elasticache", RemotePort: 6379}
+		if got := defaultLocalPort(spec, cfg); got != 6379 {
+			t.Errorf("got %d, want 6379", got)
+		}
+	})
+
+	t.Run("opensearch falls back to 9250, not the remote HTTPS port", func(t *testing.T) {
+		spec := tunnelSpec{Type: string(tunnel.TunnelTypeOpenSearch), RemotePort: 443}
+		if got := defaultLocalPort(spec, cfg); got != 9250 {
+			t.Errorf("got %d, want 9250", got)
+		}
+	})
+
+	t.Run("nil config still falls back", func(t *testing.T) {
+		spec := tunnelSpec{Type: "rds", RemotePort: 5432}
+		if got := defaultLocalPort(spec, nil); got != 5432 {
+			t.Errorf("got %d, want 5432", got)
+		}
+	})
+}
+
+func TestDashTargetPickPrefillsLocalPort(t *testing.T) {
+	cfg := &config.Config{DefaultLocalPorts: map[string]int{"rds": 3307}}
+
+	t.Run("non-EC2 target goes straight to the local-port prompt", func(t *testing.T) {
+		m := dashModel{
+			mode:     modeTargetPick,
+			cfg:      cfg,
+			progress: &startProgress{},
+			targets: []dashTarget{
+				{label: "prod-db", spec: tunnelSpec{Type: "rds", Target: "prod-db", RemotePort: 5432}},
+			},
+		}
+		got, cmd := m.handleKey(key("enter"))
+		dm := got.(dashModel)
+		if dm.mode != modeLocalPortInput {
+			t.Fatalf("mode = %v, want modeLocalPortInput", dm.mode)
+		}
+		if dm.localPortBuf != "3307" {
+			t.Errorf("localPortBuf = %q, want %q", dm.localPortBuf, "3307")
+		}
+		if cmd != nil {
+			t.Error("expected no command yet — still prompting")
+		}
+	})
+
+	t.Run("EC2 target asks for remote port first", func(t *testing.T) {
+		m := dashModel{
+			mode:     modeTargetPick,
+			progress: &startProgress{},
+			targets: []dashTarget{
+				{label: "i-abc", needsPort: true, spec: tunnelSpec{Type: "ec2", Target: "i-abc"}},
+			},
+		}
+		got, _ := m.handleKey(key("enter"))
+		if dm := got.(dashModel); dm.mode != modePortInput {
+			t.Fatalf("mode = %v, want modePortInput", dm.mode)
+		}
+	})
+}
+
+func TestDashLocalPortInput(t *testing.T) {
+	base := dashModel{
+		mode:        modeLocalPortInput,
+		cfg:         &config.Config{},
+		progress:    &startProgress{},
+		pendingSpec: tunnelSpec{Type: "rds", Target: "prod-db", RemotePort: 5432},
+	}
+
+	t.Run("typing and backspace edit the buffer", func(t *testing.T) {
+		m := base
+		for _, k := range []string{"3", "3", "0", "8", "backspace"} {
+			got, _ := m.handleKey(key(k))
+			m = got.(dashModel)
+		}
+		if m.localPortBuf != "330" {
+			t.Errorf("localPortBuf = %q, want %q", m.localPortBuf, "330")
+		}
+	})
+
+	t.Run("non-numeric port is rejected", func(t *testing.T) {
+		m := base
+		m.localPortBuf = ""
+		got, cmd := m.handleKey(key("enter"))
+		dm := got.(dashModel)
+		if dm.mode != modeLocalPortInput {
+			t.Errorf("mode = %v, want to stay in modeLocalPortInput", dm.mode)
+		}
+		if cmd != nil {
+			t.Error("expected no command for an invalid port")
+		}
+		if dm.message == "" {
+			t.Error("expected a validation message")
+		}
+	})
+
+	t.Run("a busy port is rejected with a retry", func(t *testing.T) {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		busyPort := l.Addr().(*net.TCPAddr).Port
+
+		m := base
+		m.localPortBuf = ""
+		for _, r := range []rune(strconv.Itoa(busyPort)) {
+			got, _ := m.handleKey(key(string(r)))
+			m = got.(dashModel)
+		}
+		got, cmd := m.handleKey(key("enter"))
+		dm := got.(dashModel)
+		if dm.mode != modeLocalPortInput {
+			t.Errorf("mode = %v, want to stay in modeLocalPortInput", dm.mode)
+		}
+		if cmd != nil {
+			t.Error("expected no command for a busy port")
+		}
+		if dm.message == "" {
+			t.Error("expected a validation message")
+		}
+	})
+
+	t.Run("enter with a free port starts the launch", func(t *testing.T) {
+		freePort, err := tunnel.FindFreePort()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := base
+		m.localPortBuf = strconv.Itoa(freePort)
+		got, cmd := m.handleKey(key("enter"))
+		dm := got.(dashModel)
+		if dm.mode != modeStarting {
+			t.Errorf("mode = %v, want modeStarting", dm.mode)
+		}
+		if cmd == nil {
+			t.Error("expected a launch command")
+		}
+	})
+
+	t.Run("esc on a non-EC2 target returns to target pick", func(t *testing.T) {
+		m := base
+		got, _ := m.handleKey(key("esc"))
+		if dm := got.(dashModel); dm.mode != modeTargetPick {
+			t.Errorf("mode = %v, want modeTargetPick", dm.mode)
+		}
+	})
+
+	t.Run("esc on an EC2 target returns to the remote-port prompt", func(t *testing.T) {
+		m := base
+		m.pendingSpec = tunnelSpec{Type: "ec2", Target: "i-abc", RemotePort: 8080}
+		got, _ := m.handleKey(key("esc"))
+		dm := got.(dashModel)
+		if dm.mode != modePortInput {
+			t.Errorf("mode = %v, want modePortInput", dm.mode)
+		}
+		if dm.portBuf != "8080" {
+			t.Errorf("portBuf = %q, want %q", dm.portBuf, "8080")
+		}
+	})
+}
+
+func TestDashPortInputPrefillsLocalPort(t *testing.T) {
+	cfg := &config.Config{DefaultLocalPorts: map[string]int{"ec2": 2222}}
+	m := dashModel{
+		mode:        modePortInput,
+		cfg:         cfg,
+		progress:    &startProgress{},
+		pendingSpec: tunnelSpec{Type: "ec2", Target: "i-abc"},
+	}
+	for _, k := range []string{"8", "0", "8", "0"} {
+		got, _ := m.handleKey(key(k))
+		m = got.(dashModel)
+	}
+	got, cmd := m.handleKey(key("enter"))
+	dm := got.(dashModel)
+	if dm.mode != modeLocalPortInput {
+		t.Fatalf("mode = %v, want modeLocalPortInput", dm.mode)
+	}
+	if dm.localPortBuf != "2222" {
+		t.Errorf("localPortBuf = %q, want %q", dm.localPortBuf, "2222")
+	}
+	if dm.pendingSpec.RemotePort != 8080 {
+		t.Errorf("pendingSpec.RemotePort = %d, want 8080", dm.pendingSpec.RemotePort)
+	}
+	if cmd != nil {
+		t.Error("expected no command yet — still prompting for the local port")
+	}
+}
+
 func TestTokenCmdWithoutEndpoint(t *testing.T) {
 	// A pre-RemoteHost state file must fail fast rather than reach AWS.
 	msg := tokenCmd(state.TunnelState{ID: "rds-15432", Type: "rds"}, "readonly")()
@@ -206,5 +411,92 @@ func TestTokenCmdWithoutEndpoint(t *testing.T) {
 	}
 	if done.err == nil {
 		t.Error("expected an error for a tunnel with no recorded endpoint")
+	}
+}
+
+func TestDashUnmanagedNavigation(t *testing.T) {
+	base := dashModel{
+		mode:     modeList,
+		progress: &startProgress{},
+		tunnels:  []state.TunnelState{{ID: "rds-15432", Type: "rds", Target: "prod-db"}},
+		unmanaged: []tunnel.UnmanagedSession{
+			{PID: 4242, LocalPort: 3307, Detail: "prod-db.rds.amazonaws.com:3306 (profile latest)"},
+		},
+	}
+
+	// "down" from within the valid range also calls reload(), which re-reads
+	// real state via state.List()/lsof — not hermetic, so it's not exercised
+	// here; only the boundary (no-op) case is, since that branch never calls
+	// reload().
+	t.Run("down does not overrun the combined list", func(t *testing.T) {
+		m := base
+		m.cursor = 1
+		got, _ := m.handleKey(key("down"))
+		if dm := got.(dashModel); dm.cursor != 1 {
+			t.Errorf("cursor = %d, want to stay at 1", dm.cursor)
+		}
+	})
+
+	t.Run("d on an unmanaged row enters confirm", func(t *testing.T) {
+		m := base
+		m.cursor = 1
+		got, _ := m.handleKey(key("d"))
+		if dm := got.(dashModel); dm.mode != modeConfirm {
+			t.Errorf("mode = %v, want modeConfirm", dm.mode)
+		}
+	})
+
+	t.Run("confirmLabel describes the unmanaged session", func(t *testing.T) {
+		m := base
+		m.cursor = 1
+		got := m.confirmLabel()
+		want := "unmanaged session on :3307 (pid 4242)"
+		if got != want {
+			t.Errorf("confirmLabel() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("confirming y on an unmanaged row kills it, not a tracked tunnel", func(t *testing.T) {
+		m := base
+		m.cursor = 1
+		m.mode = modeConfirm
+		got, cmd := m.handleKey(key("y"))
+		dm := got.(dashModel)
+		if dm.mode != modeList {
+			t.Errorf("mode = %v, want modeList", dm.mode)
+		}
+		if cmd == nil {
+			t.Fatal("expected a kill command")
+		}
+		msg, ok := cmd().(stopDoneMsg)
+		if !ok {
+			t.Fatalf("got %T, want stopDoneMsg", msg)
+		}
+		if msg.id != "pid 4242 (:3307)" {
+			t.Errorf("stopDoneMsg.id = %q, want %q", msg.id, "pid 4242 (:3307)")
+		}
+	})
+}
+
+func TestKillUnmanagedSession(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to spawn test process: %v", err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+
+	// Reap it as soon as it exits, exactly as a real unmanaged session's own
+	// (non-TunnelBoy) parent would — otherwise it lingers as a zombie, whose
+	// PID still answers signal 0, making IsAlive report it as alive until
+	// something reaps it.
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	result := killUnmanagedSession(cmd.Process.Pid)
+	if result != stopClean {
+		t.Errorf("killUnmanagedSession() = %v, want stopClean", result)
+	}
+	if err := <-waited; err == nil {
+		t.Error("expected the process to have been signalled")
 	}
 }

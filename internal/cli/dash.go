@@ -42,15 +42,16 @@ type dashMode int
 const (
 	modeList dashMode = iota
 	modeConfirm
-	modeNewPick     // combined preset + service-type picker
-	modeLaunching   // preset subprocess in flight
-	modeDiscovering // AWS discovery in flight
-	modeTargetPick  // pick a discovered target
-	modePortInput   // EC2: enter remote port
-	modeJumpPick    // multiple jump hosts: pick one
-	modeStarting    // spawnDetached in flight
-	modeDBUserInput // RDS: enter the DB user to mint an IAM token for
-	modeTokenGen    // IAM token generation in flight
+	modeNewPick        // combined preset + service-type picker
+	modeLaunching      // preset subprocess in flight
+	modeDiscovering    // AWS discovery in flight
+	modeTargetPick     // pick a discovered target
+	modePortInput      // EC2: enter remote port
+	modeLocalPortInput // enter the local port to bind (pre-filled with a default)
+	modeJumpPick       // multiple jump hosts: pick one
+	modeStarting       // spawnDetached in flight
+	modeDBUserInput    // RDS: enter the DB user to mint an IAM token for
+	modeTokenGen       // IAM token generation in flight
 )
 
 // newItem is one row of the launcher: either a config preset (launched via
@@ -72,8 +73,9 @@ type dashTarget struct {
 }
 
 type dashModel struct {
-	tunnels []state.TunnelState
-	cursor  int
+	tunnels   []state.TunnelState
+	unmanaged []tunnel.UnmanagedSession
+	cursor    int
 
 	newItems  []newItem
 	newCursor int
@@ -85,8 +87,9 @@ type dashModel struct {
 	jumpHosts  []aws.JumpHost
 	jumpCursor int
 
-	pendingSpec tunnelSpec
-	portBuf     string
+	pendingSpec  tunnelSpec
+	portBuf      string
+	localPortBuf string
 
 	// tokenTunnel is the tunnel an IAM token is being minted for; dbUserBuf is
 	// the user being typed for it.
@@ -259,15 +262,24 @@ func (m *dashModel) reload() {
 	}
 	sort.Slice(tunnels, func(i, j int) bool { return tunnels[i].ID < tunnels[j].ID })
 	m.tunnels = tunnels
-	if m.cursor >= len(m.tunnels) {
-		m.cursor = len(m.tunnels) - 1
+
+	managedOwners := make(map[int]bool, len(tunnels))
+	for _, t := range tunnels {
+		managedOwners[t.PID] = true
+	}
+	m.unmanaged = tunnel.DiscoverUnmanagedSessions(managedOwners)
+	sort.Slice(m.unmanaged, func(i, j int) bool { return m.unmanaged[i].LocalPort < m.unmanaged[j].LocalPort })
+
+	total := len(m.tunnels) + len(m.unmanaged)
+	if m.cursor >= total {
+		m.cursor = total - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
 
 	m.logLines = nil
-	if len(m.tunnels) > 0 {
+	if m.cursor < len(m.tunnels) {
 		t := m.tunnels[m.cursor]
 		if t.LogFile != "" {
 			m.logLines = tailLines(t.LogFile, dashLogLines)
@@ -395,10 +407,16 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "y", "Y":
 			m.mode = modeList
-			if m.cursor < len(m.tunnels) {
+			switch {
+			case m.cursor < len(m.tunnels):
 				t := m.tunnels[m.cursor]
 				m.message = fmt.Sprintf("► closing %s...", t.ID)
 				return m, func() tea.Msg { return stopDoneMsg{t.ID, stopTunnelProcess(&t)} }
+			case m.cursor < len(m.tunnels)+len(m.unmanaged):
+				u := m.unmanaged[m.cursor-len(m.tunnels)]
+				label := fmt.Sprintf("pid %d (:%d)", u.PID, u.LocalPort)
+				m.message = fmt.Sprintf("► killing %s...", label)
+				return m, func() tea.Msg { return stopDoneMsg{label, killUnmanagedSession(u.PID)} }
 			}
 		default:
 			m.mode = modeList
@@ -450,15 +468,16 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.targetCursor < len(m.targets) {
 				t := m.targets[m.targetCursor]
+				m.pendingSpec = t.spec
 				if t.needsPort {
-					m.pendingSpec = t.spec
 					m.portBuf = ""
 					m.mode = modePortInput
 					return m, nil
 				}
-				m.mode = modeStarting
-				m.progress.set("resolving jump host...")
-				return m, resolveJumpCmd(t.spec, m.cfg, m.progress)
+				m.localPortBuf = strconv.Itoa(defaultLocalPort(t.spec, m.cfg))
+				m.message = ""
+				m.mode = modeLocalPortInput
+				return m, nil
 			}
 		case "esc":
 			m.mode = modeNewPick
@@ -482,10 +501,11 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			spec := m.pendingSpec
 			spec.RemotePort = port
+			m.pendingSpec = spec
+			m.localPortBuf = strconv.Itoa(defaultLocalPort(spec, m.cfg))
 			m.message = ""
-			m.mode = modeStarting
-			m.progress.set("resolving jump host...")
-			return m, resolveJumpCmd(spec, m.cfg, m.progress)
+			m.mode = modeLocalPortInput
+			return m, nil
 		case key == "esc":
 			m.mode = modeTargetPick
 			m.message = ""
@@ -495,6 +515,42 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case len(key) == 1 && key[0] >= '0' && key[0] <= '9' && len(m.portBuf) < 5:
 			m.portBuf += key
+		}
+		return m, nil
+
+	case modeLocalPortInput:
+		switch {
+		case key == "enter":
+			buf := strings.TrimSpace(m.localPortBuf)
+			port, err := strconv.Atoi(buf)
+			if err != nil || port < 1 || port > 65535 {
+				m.message = "invalid port"
+				return m, nil
+			}
+			if !tunnel.PortAvailable(port) {
+				m.message = fmt.Sprintf("port %d is already in use — pick another", port)
+				return m, nil
+			}
+			spec := m.pendingSpec
+			spec.RequestedPort = port
+			m.message = ""
+			m.mode = modeStarting
+			m.progress.set("resolving jump host...")
+			return m, resolveJumpCmd(spec, m.cfg, m.progress)
+		case key == "esc":
+			if m.pendingSpec.Type == string(tunnel.TunnelTypeEC2) {
+				m.portBuf = strconv.Itoa(m.pendingSpec.RemotePort)
+				m.mode = modePortInput
+			} else {
+				m.mode = modeTargetPick
+			}
+			m.message = ""
+		case key == "backspace":
+			if len(m.localPortBuf) > 0 {
+				m.localPortBuf = m.localPortBuf[:len(m.localPortBuf)-1]
+			}
+		case len(key) == 1 && key[0] >= '0' && key[0] <= '9' && len(m.localPortBuf) < 5:
+			m.localPortBuf += key
 		}
 		return m, nil
 
@@ -564,12 +620,12 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.reload()
 			}
 		case "down", "j":
-			if m.cursor < len(m.tunnels)-1 {
+			if m.cursor < len(m.tunnels)+len(m.unmanaged)-1 {
 				m.cursor++
 				m.reload()
 			}
 		case "d":
-			if len(m.tunnels) > 0 {
+			if len(m.tunnels)+len(m.unmanaged) > 0 {
 				m.mode = modeConfirm
 			}
 		case "c":
@@ -806,22 +862,23 @@ func resolveJumpCmd(spec tunnelSpec, cfg *config.Config, prog *startProgress) te
 	}
 }
 
-// finishLaunch resolves local ports and spawns the detached runner.
+// finishLaunch applies the user-chosen local port (from the dashboard's port
+// prompt) and spawns the detached runner. For OpenSearch, the chosen port is
+// the user-facing signing proxy; the SSM tunnel behind it always gets an
+// arbitrary free port since nothing outside the proxy talks to it directly.
 func finishLaunch(spec tunnelSpec, host *aws.JumpHost, cfg *config.Config, prog *startProgress) tea.Msg {
 	spec.JumpHostID = host.ID
 	applyAutoStop(&spec, host, cfg)
 
-	var err error
 	if spec.Type == string(tunnel.TunnelTypeOpenSearch) {
-		spec.ProxyPort, err = silentLocalPort(9250)
-		if err == nil {
-			spec.LocalPort, err = tunnel.FindFreePort()
+		spec.ProxyPort = spec.RequestedPort
+		var err error
+		spec.LocalPort, err = tunnel.FindFreePort()
+		if err != nil {
+			return startDoneMsg{err: err}
 		}
 	} else {
-		spec.LocalPort, err = silentLocalPort(spec.RemotePort)
-	}
-	if err != nil {
-		return startDoneMsg{err: err}
+		spec.LocalPort = spec.RequestedPort
 	}
 
 	prog.set(fmt.Sprintf("starting tunnel process on localhost:%d...", spec.userPort()))
@@ -829,13 +886,18 @@ func finishLaunch(spec tunnelSpec, host *aws.JumpHost, cfg *config.Config, prog 
 	return startDoneMsg{st: st, err: err}
 }
 
-// silentLocalPort prefers the fallback port, quietly picking a free one when
-// it's taken (no terminal output — we're inside the TUI).
-func silentLocalPort(fallback int) (int, error) {
-	if fallback != 0 && tunnel.PortAvailable(fallback) {
-		return fallback, nil
+// defaultLocalPort is the value pre-filled in the dashboard's local-port
+// prompt: the user's configured default for this tunnel type if set, else
+// the type's own typical port (9250 for OpenSearch's signing proxy, the
+// remote port for everything else).
+func defaultLocalPort(spec tunnelSpec, cfg *config.Config) int {
+	if p := cfg.DefaultLocalPort(spec.Type); p != 0 {
+		return p
 	}
-	return tunnel.FindFreePort()
+	if spec.Type == string(tunnel.TunnelTypeOpenSearch) {
+		return 9250
+	}
+	return spec.RemotePort
 }
 
 // connectionString builds a pasteable client URL for a tunnel. The engine (for
@@ -935,6 +997,13 @@ func (m dashModel) View() string {
 		b.WriteString("\n")
 		b.WriteString(tui.DimStyle.Render("  (empty = 22)"))
 		b.WriteString("\n")
+	case modeLocalPortInput:
+		b.WriteString(tui.TitleStyle.Render("LOCAL PORT"))
+		b.WriteString("\n")
+		b.WriteString(tui.TextStyle.Render(fmt.Sprintf("  Bind %s to local port: %s_", m.pendingSpec.Target, m.localPortBuf)))
+		b.WriteString("\n")
+		b.WriteString(tui.DimStyle.Render("  (backspace to edit; set default_local_ports in ~/.tunnelboy.yaml to change the default)"))
+		b.WriteString("\n")
 	case modeJumpPick:
 		m.viewJumpHosts(&b)
 	case modeDBUserInput:
@@ -984,7 +1053,11 @@ func (m dashModel) View() string {
 	var hints string
 	switch m.mode {
 	case modeConfirm:
-		hints = fmt.Sprintf("Disconnect %s? [y] yes  [any] cancel", m.selectedID())
+		action := "Disconnect"
+		if m.cursor >= len(m.tunnels) {
+			action = "Kill"
+		}
+		hints = fmt.Sprintf("%s %s? [y] yes  [any] cancel", action, m.confirmLabel())
 	case modeNewPick:
 		hints = "↑↓ Navigate • Enter Launch/Discover • Esc Back • q Quit"
 	case modeLaunching:
@@ -995,6 +1068,8 @@ func (m dashModel) View() string {
 		hints = "↑↓ Navigate • Enter Connect • Esc Back"
 	case modePortInput:
 		hints = "Digits • Enter Confirm • Esc Back"
+	case modeLocalPortInput:
+		hints = "Digits • Enter Confirm • Esc Back"
 	case modeJumpPick:
 		hints = "↑↓ Navigate • Enter Select Jump Host • Esc Cancel"
 	case modeStarting:
@@ -1004,7 +1079,7 @@ func (m dashModel) View() string {
 	case modeTokenGen:
 		hints = "Generating IAM token..."
 	default:
-		hints = "↑↓ Select • [c] Copy URL • [t] IAM Token • [d] Disconnect • [n] New • [r] Refresh • [q] Quit"
+		hints = "↑↓ Select • [c] Copy URL • [t] IAM Token • [d] Disconnect/Kill • [n] New • [r] Refresh • [q] Quit"
 	}
 	b.WriteString(tui.RenderStatusBar(hints))
 
@@ -1014,6 +1089,18 @@ func (m dashModel) View() string {
 func (m dashModel) selectedID() string {
 	if m.cursor < len(m.tunnels) {
 		return m.tunnels[m.cursor].ID
+	}
+	return "?"
+}
+
+// confirmLabel names what [d] is about to act on, for the confirm prompt.
+func (m dashModel) confirmLabel() string {
+	if m.cursor < len(m.tunnels) {
+		return m.tunnels[m.cursor].ID
+	}
+	if i := m.cursor - len(m.tunnels); i < len(m.unmanaged) {
+		u := m.unmanaged[i]
+		return fmt.Sprintf("unmanaged session on :%d (pid %d)", u.LocalPort, u.PID)
 	}
 	return "?"
 }
@@ -1036,38 +1123,73 @@ func (m dashModel) viewTunnels(b *strings.Builder) {
 	if len(m.tunnels) == 0 {
 		b.WriteString(tui.DimStyle.Render("  No active tunnels. Press [n] to launch or discover."))
 		b.WriteString("\n")
-		return
+	} else {
+		header := fmt.Sprintf("  %-18s %-22s %-16s %-10s %-4s %-10s %s",
+			"ID", "TARGET", "ENDPOINT", "PROFILE", "MODE", "STATUS", "UPTIME")
+		b.WriteString(tui.DimStyle.Render(header))
+		b.WriteString("\n")
+
+		for i, t := range m.tunnels {
+			mode := "fg"
+			if t.Detached {
+				mode = "bg"
+			}
+			row := fmt.Sprintf("%-18s %-22s %-16s %-10s %-4s %-10s %s",
+				truncate(t.ID, 18), truncate(t.Target, 22),
+				fmt.Sprintf("localhost:%d", t.LocalPort),
+				truncate(t.Profile, 10), mode, stripToWidth(dashStatus(t), 10), dashUptime(t))
+			if i == m.cursor {
+				b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
+			} else {
+				b.WriteString("  " + tui.ItemStyle.Render(row))
+			}
+			b.WriteString("\n")
+		}
 	}
 
-	header := fmt.Sprintf("  %-18s %-22s %-16s %-10s %-4s %-10s %s",
-		"ID", "TARGET", "ENDPOINT", "PROFILE", "MODE", "STATUS", "UPTIME")
-	b.WriteString(tui.DimStyle.Render(header))
-	b.WriteString("\n")
-
-	for i, t := range m.tunnels {
-		mode := "fg"
-		if t.Detached {
-			mode = "bg"
-		}
-		row := fmt.Sprintf("%-18s %-22s %-16s %-10s %-4s %-10s %s",
-			truncate(t.ID, 18), truncate(t.Target, 22),
-			fmt.Sprintf("localhost:%d", t.LocalPort),
-			truncate(t.Profile, 10), mode, stripToWidth(dashStatus(t), 10), dashUptime(t))
-		if i == m.cursor {
-			b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
-		} else {
-			b.WriteString("  " + tui.ItemStyle.Render(row))
-		}
+	if len(m.unmanaged) > 0 {
 		b.WriteString("\n")
+		b.WriteString(tui.TitleStyle.Render("UNMANAGED TUNNELS"))
+		b.WriteString("\n")
+		b.WriteString(tui.DimStyle.Render("  session-manager-plugin sessions TunnelBoy didn't start — [d] to kill"))
+		b.WriteString("\n")
+
+		header := fmt.Sprintf("  %-8s %-8s %s", "PID", "PORT", "DETAIL")
+		b.WriteString(tui.DimStyle.Render(header))
+		b.WriteString("\n")
+
+		for i, u := range m.unmanaged {
+			detail := u.Detail
+			if detail == "" {
+				detail = "(unknown target)"
+			}
+			row := fmt.Sprintf("%-8d %-8d %s", u.PID, u.LocalPort, truncate(detail, 60))
+			idx := len(m.tunnels) + i
+			if idx == m.cursor {
+				b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
+			} else {
+				b.WriteString("  " + tui.ItemStyle.Render(row))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if len(m.tunnels) == 0 && len(m.unmanaged) == 0 {
+		return
 	}
 
 	b.WriteString("\n")
 	b.WriteString(tui.RenderDivider(70))
 	b.WriteString("\n")
-	b.WriteString(tui.DimStyle.Render(fmt.Sprintf(" LOG: %s", m.selectedID())))
-	b.WriteString("\n")
-	for _, l := range m.logLines {
-		b.WriteString(tui.DimStyle.Render("  " + truncate(l, 100)))
+	if m.cursor < len(m.tunnels) {
+		b.WriteString(tui.TitleStyle.Render(fmt.Sprintf("LOG: %s", m.selectedID())))
+		b.WriteString("\n")
+		for _, l := range m.logLines {
+			b.WriteString(tui.DimStyle.Render("  " + truncate(l, 100)))
+			b.WriteString("\n")
+		}
+	} else {
+		b.WriteString(tui.DimStyle.Render("  (unmanaged session — no log available)"))
 		b.WriteString("\n")
 	}
 }

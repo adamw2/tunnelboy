@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,9 +28,15 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 }
 
-func checkPass(msg string)  { fmt.Printf("  %s %s\n", tui.SuccessStyle.Render("✓"), msg) }
-func checkWarn(msg string)  { fmt.Printf("  %s %s\n", tui.WarningStyle.Render("⚠"), msg) }
-func checkFail(msg string)  { fmt.Printf("  %s %s\n", tui.ErrorStyle.Render("✗"), msg) }
+func checkPass(msg string) { fmt.Printf("  %s %s\n", tui.SuccessStyle.Render("✓"), msg) }
+func checkWarn(msg string) { fmt.Printf("  %s %s\n", tui.WarningStyle.Render("⚠"), msg) }
+func checkFail(msg string) { fmt.Printf("  %s %s\n", tui.ErrorStyle.Render("✗"), msg) }
+
+// checkGroup prints a section heading, followed by a blank line once the
+// group's own checks are done (the caller runs those in between).
+func checkGroup(title string) {
+	fmt.Println(tui.SubheaderStyle.Render(title))
+}
 
 func runDoctor(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
@@ -37,7 +45,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	fmt.Println(tui.TitleStyle.Render("TunnelBoy Doctor"))
 	fmt.Println()
 
-	// 1. session-manager-plugin
+	// Prerequisites
+	checkGroup("Prerequisites")
 	if path, err := exec.LookPath("session-manager-plugin"); err == nil {
 		checkPass(fmt.Sprintf("session-manager-plugin found (%s)", path))
 	} else {
@@ -45,7 +54,6 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		failures++
 	}
 
-	// 2. AWS profiles
 	profiles, err := aws.ListProfiles()
 	switch {
 	case err != nil:
@@ -57,8 +65,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	default:
 		checkPass(fmt.Sprintf("%d AWS profile(s) configured", len(profiles)))
 	}
+	fmt.Println()
 
-	// 3. TunnelBoy config
+	// Configuration
+	checkGroup("Configuration")
 	if len(loadedConfigFiles) == 0 {
 		home, _ := os.UserHomeDir()
 		checkWarn(fmt.Sprintf("no config file loaded (create %s)", filepath.Join(home, ".tunnelboy.yaml")))
@@ -75,9 +85,24 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		cfg = nil
 	} else {
 		checkPass(fmt.Sprintf("%d connection preset(s) defined", len(cfg.Connections)))
+		if len(cfg.DefaultLocalPorts) > 0 {
+			types := make([]string, 0, len(cfg.DefaultLocalPorts))
+			for t := range cfg.DefaultLocalPorts {
+				types = append(types, t)
+			}
+			sort.Strings(types)
+			overrides := make([]string, len(types))
+			for i, t := range types {
+				overrides[i] = fmt.Sprintf("%s=%d", t, cfg.DefaultLocalPorts[t])
+			}
+			checkPass(fmt.Sprintf("default local ports: %s", strings.Join(overrides, ", ")))
+		}
 	}
+	fmt.Printf("    %s\n", tui.DimStyle.Render("config file options: https://github.com/adamw2/tunnelboy#configuration"))
+	fmt.Println()
 
-	// 4. Credentials
+	// AWS Credentials
+	checkGroup("AWS Credentials")
 	pm := aws.NewProfileManager()
 	profileName := viper.GetString("profile")
 	credsOK := false
@@ -101,9 +126,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			failures++
 		}
 	}
+	fmt.Println()
 
-	// 5. Jump host discovery (only meaningful with valid credentials)
+	// Jump Hosts (only meaningful with valid credentials)
 	if credsOK && cfg != nil {
+		checkGroup("Jump Hosts")
 		discovery := aws.NewDiscovery(pm.GetConfig())
 		jhCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		jumpHosts, err := discovery.DiscoverJumpHosts(jhCtx, cfg)
@@ -116,9 +143,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		default:
 			checkPass(fmt.Sprintf("%d jump host(s) discovered", len(jumpHosts)))
 		}
+		fmt.Println()
 	}
 
-	// 6. Optional DB clients (for connect rds --exec)
+	// Optional Tools
+	checkGroup("Optional Tools")
 	for _, client := range []string{"psql", "mysql"} {
 		if _, err := exec.LookPath(client); err == nil {
 			checkPass(fmt.Sprintf("%s found (for connect rds --exec)", client))

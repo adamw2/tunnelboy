@@ -41,6 +41,11 @@ type tunnelSpec struct {
 	// ECS auto-stop: task the parent started that the child must stop on close.
 	AutoStopCluster string `json:"auto_stop_cluster,omitempty"`
 	AutoStopTaskARN string `json:"auto_stop_task_arn,omitempty"`
+
+	// RequestedPort is the user-facing local port chosen (or defaulted) at the
+	// dashboard's port prompt, before LocalPort/ProxyPort are resolved by
+	// finishLaunch. Parent-side only — never sent to the runner child.
+	RequestedPort int `json:"-"`
 }
 
 // stateID returns the tunnel's state-file ID. For OpenSearch the user-facing

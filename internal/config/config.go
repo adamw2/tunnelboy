@@ -8,16 +8,32 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	DefaultProfile string     `mapstructure:"default_profile"`
-	JumpHosts      JumpHosts  `mapstructure:"jump_hosts"`
+	DefaultProfile string                `mapstructure:"default_profile"`
+	JumpHosts      JumpHosts             `mapstructure:"jump_hosts"`
 	Connections    map[string]Connection `mapstructure:"connections"`
+
+	// DefaultLocalPorts pre-fills the local-port prompt shown when launching a
+	// discovered (non-preset) target from the dashboard, keyed by tunnel type
+	// (rds, opensearch, ec2, elasticache, docdb, msk). A type with no entry
+	// falls back to the tunnel's own typical port (the remote port, or 9250
+	// for opensearch).
+	DefaultLocalPorts map[string]int `mapstructure:"default_local_ports"`
+}
+
+// DefaultLocalPort returns the configured default local port for a tunnel
+// type, or 0 if none is set.
+func (c *Config) DefaultLocalPort(tunnelType string) int {
+	if c == nil {
+		return 0
+	}
+	return c.DefaultLocalPorts[tunnelType]
 }
 
 // JumpHosts defines how to discover jump hosts
 type JumpHosts struct {
-	Patterns  []string   `mapstructure:"patterns"`
+	Patterns  []string    `mapstructure:"patterns"`
 	Tags      []TagFilter `mapstructure:"tags"`
-	Instances []string   `mapstructure:"instances"`
+	Instances []string    `mapstructure:"instances"`
 	ECS       []ECSTarget `mapstructure:"ecs"`
 
 	// Prefer constrains discovery to a single host type. Currently only "ecs"
@@ -91,10 +107,10 @@ func Load() (*Config, error) {
 	}
 
 	// Set defaults if not configured
-	if len(cfg.JumpHosts.Patterns) == 0 && 
-	   len(cfg.JumpHosts.Tags) == 0 && 
-	   len(cfg.JumpHosts.Instances) == 0 &&
-	   len(cfg.JumpHosts.ECS) == 0 {
+	if len(cfg.JumpHosts.Patterns) == 0 &&
+		len(cfg.JumpHosts.Tags) == 0 &&
+		len(cfg.JumpHosts.Instances) == 0 &&
+		len(cfg.JumpHosts.ECS) == 0 {
 		cfg.JumpHosts.Patterns = []string{"*bastion*", "*jump*"}
 	}
 

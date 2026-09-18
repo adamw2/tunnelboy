@@ -39,6 +39,19 @@ jump_hosts:
     - cluster: staging-cluster
       service: jump-host-service
 
+# Default local ports offered when launching a discovered target from the
+# dashboard (`tunnelboy dash`). Pre-fills the local-port prompt so you don't
+# have to retype it every time; you can still edit it per-launch. A type with
+# no entry here falls back to its typical port (the remote port itself, or
+# 9250 for opensearch).
+default_local_ports:
+  rds: 3307           # avoid clashing with a local MySQL/Postgres on 3306/5432
+  opensearch: 9250
+  elasticache: 6379
+  docdb: 27017
+  msk: 9092
+  ec2: 2222
+
 # Saved connection presets
 # Use with: tunnelboy connect <preset-name>
 connections:
