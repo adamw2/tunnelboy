@@ -20,6 +20,10 @@ type Discovery struct {
 	cfg       aws.Config
 	autoStart bool
 	progress  ProgressFunc
+
+	// ecs is the injectable ECS client (see ecsClient in ecs_autostart.go).
+	// Left nil in normal use — the real SDK client is constructed lazily.
+	ecs ecsAPI
 }
 
 // NewDiscovery creates a new discovery client
@@ -397,7 +401,7 @@ func (d *Discovery) autoStartByPattern(ctx context.Context, patterns []string) (
 
 // discoverECSTasksByService discovers ECS tasks in a specific service
 func (d *Discovery) discoverECSTasksByService(ctx context.Context, clusterName, serviceName string) ([]ECSTask, error) {
-	client := ecs.NewFromConfig(d.cfg)
+	client := d.ecsClient()
 
 	// List tasks for the service
 	tasksResult, err := client.ListTasks(ctx, &ecs.ListTasksInput{
@@ -562,7 +566,7 @@ func (d *Discovery) DiscoverOpenSearchDomains(ctx context.Context) ([]OpenSearch
 
 // DiscoverECSTasks discovers ECS tasks matching patterns
 func (d *Discovery) DiscoverECSTasks(ctx context.Context, patterns []string) ([]ECSTask, error) {
-	client := ecs.NewFromConfig(d.cfg)
+	client := d.ecsClient()
 
 	// List clusters
 	clustersResult, err := client.ListClusters(ctx, &ecs.ListClustersInput{})
