@@ -2,12 +2,18 @@ package cli
 
 import (
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/viper"
 
+	"github.com/adamw2/tunnelboy/internal/aws"
 	"github.com/adamw2/tunnelboy/internal/config"
 	"github.com/adamw2/tunnelboy/internal/state"
 	"github.com/adamw2/tunnelboy/internal/tunnel"
@@ -499,4 +505,227 @@ func TestKillUnmanagedSession(t *testing.T) {
 	if err := <-waited; err == nil {
 		t.Error("expected the process to have been signalled")
 	}
+}
+
+func TestReloadDetectsVanishedTunnel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	dead := state.TunnelState{ID: "rds-9999", PID: 99999999, Type: "rds", Target: "prod-db"}
+	if err := state.Write(dead); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &dashModel{mode: modeList, progress: &startProgress{}, tunnels: []state.TunnelState{dead}}
+	m.reload()
+
+	if len(m.tunnels) != 0 {
+		t.Fatalf("expected the dead tunnel to be pruned, got %+v", m.tunnels)
+	}
+	if !containsAction(m.actions, "rds-9999") || !containsAction(m.actions, "vanished") {
+		t.Errorf("actions = %v, want a vanish notice for rds-9999", m.actions)
+	}
+	if m.failureLabel != "rds-9999" {
+		t.Errorf("failureLabel = %q, want %q", m.failureLabel, "rds-9999")
+	}
+	if len(m.failureLog) == 0 {
+		t.Error("expected a failureLog entry (even a placeholder, since this tunnel had no LogFile recorded)")
+	}
+}
+
+func TestReloadSkipsVanishNoticeForExpectedRemoval(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	dead := state.TunnelState{ID: "rds-9998", PID: 99999999, Type: "rds", Target: "prod-db"}
+	if err := state.Write(dead); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &dashModel{
+		mode:            modeList,
+		progress:        &startProgress{},
+		tunnels:         []state.TunnelState{dead},
+		pendingRemovals: map[string]bool{"rds-9998": true},
+	}
+	m.reload()
+
+	if len(m.actions) != 0 {
+		t.Errorf("actions = %v, want none — this removal was expected", m.actions)
+	}
+	if m.pendingRemovals["rds-9998"] {
+		t.Error("pendingRemovals entry should be cleared once the removal is observed")
+	}
+}
+
+func TestRecordActionCapsHistory(t *testing.T) {
+	m := &dashModel{}
+	for i := 0; i < dashActionHistory+2; i++ {
+		m.recordAction(strconv.Itoa(i))
+	}
+	if len(m.actions) != dashActionHistory {
+		t.Fatalf("actions len = %d, want %d", len(m.actions), dashActionHistory)
+	}
+	// Most recent first.
+	if want := strconv.Itoa(dashActionHistory + 1); m.actions[0] != want {
+		t.Errorf("actions[0] = %q, want %q", m.actions[0], want)
+	}
+}
+
+func containsAction(actions []string, substr string) bool {
+	for _, a := range actions {
+		if strings.Contains(a, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLaunchDoneMsgWarnsWhenTunnelAlreadyGone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Nothing in state — simulates the detached runner having died in the
+	// instant between writing its state file and this reload.
+	m := dashModel{mode: modeLaunching, progress: &startProgress{}}
+	got, _ := m.Update(launchDoneMsg{name: "latestadmin", output: "tunnel ready\n"})
+	dm := got.(dashModel)
+
+	if len(dm.tunnels) != 0 {
+		t.Fatalf("expected no tunnels, got %+v", dm.tunnels)
+	}
+	if !containsAction(dm.actions, "latestadmin") || !containsAction(dm.actions, "reported started") {
+		t.Errorf("actions = %v, want a warning that latestadmin reported started but isn't active", dm.actions)
+	}
+}
+
+func TestLaunchDoneMsgNoWarningWhenTunnelIsActive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	live := state.TunnelState{ID: "rds-3307", PID: os.Getpid(), Type: "rds", Target: "prod-db", StartedAt: time.Now()}
+	if err := state.Write(live); err != nil {
+		t.Fatal(err)
+	}
+
+	m := dashModel{mode: modeLaunching, progress: &startProgress{}}
+	got, _ := m.Update(launchDoneMsg{name: "latestadmin", output: "tunnel ready\n"})
+	dm := got.(dashModel)
+
+	if len(dm.tunnels) != 1 {
+		t.Fatalf("expected the live tunnel to be picked up, got %+v", dm.tunnels)
+	}
+	if containsAction(dm.actions, "reported started") {
+		t.Errorf("actions = %v, want no false-alarm warning — the tunnel is actually active", dm.actions)
+	}
+}
+
+func TestStartDoneMsgWarnsWhenTunnelAlreadyGone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	st := state.TunnelState{ID: "rds-3308", LocalPort: 3308}
+	m := dashModel{mode: modeStarting, progress: &startProgress{}}
+	got, _ := m.Update(startDoneMsg{st: &st})
+	dm := got.(dashModel)
+
+	if !containsAction(dm.actions, "rds-3308") || !containsAction(dm.actions, "already gone") {
+		t.Errorf("actions = %v, want a warning that rds-3308 is already gone", dm.actions)
+	}
+}
+
+func TestStartDoneMsgNoWarningWhenTunnelIsActive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	live := state.TunnelState{ID: "rds-3308", PID: os.Getpid(), Type: "rds", Target: "prod-db", LocalPort: 3308, StartedAt: time.Now()}
+	if err := state.Write(live); err != nil {
+		t.Fatal(err)
+	}
+
+	m := dashModel{mode: modeStarting, progress: &startProgress{}}
+	got, _ := m.Update(startDoneMsg{st: &live})
+	dm := got.(dashModel)
+
+	if containsAction(dm.actions, "already gone") {
+		t.Errorf("actions = %v, want no false-alarm warning — the tunnel is actually active", dm.actions)
+	}
+}
+
+func TestCurrentProfileIndex(t *testing.T) {
+	orig := viper.GetString("profile")
+	t.Cleanup(func() { viper.Set("profile", orig) })
+
+	profiles := []aws.ProfileInfo{{Name: "default"}, {Name: "dev-admin"}, {Name: "latest"}}
+
+	t.Run("matches the current profile", func(t *testing.T) {
+		viper.Set("profile", "dev-admin")
+		if got := currentProfileIndex(profiles); got != 1 {
+			t.Errorf("currentProfileIndex() = %d, want 1", got)
+		}
+	})
+
+	t.Run("empty viper profile falls back to default", func(t *testing.T) {
+		viper.Set("profile", "")
+		if got := currentProfileIndex(profiles); got != 0 {
+			t.Errorf("currentProfileIndex() = %d, want 0 (default)", got)
+		}
+	})
+
+	t.Run("unknown profile falls back to index 0", func(t *testing.T) {
+		viper.Set("profile", "nonexistent")
+		if got := currentProfileIndex(profiles); got != 0 {
+			t.Errorf("currentProfileIndex() = %d, want 0", got)
+		}
+	})
+}
+
+func TestStartProfilePickOrDiscover(t *testing.T) {
+	t.Run("zero or one profile skips the picker", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir()) // no ~/.aws/config at all
+
+		m := dashModel{progress: &startProgress{}}
+		got, cmd := m.startProfilePickOrDiscover("rds")
+		if got.mode != modeDiscovering {
+			t.Errorf("mode = %v, want modeDiscovering", got.mode)
+		}
+		if got.service != "rds" {
+			t.Errorf("service = %q, want %q", got.service, "rds")
+		}
+		if cmd == nil {
+			t.Error("expected a discover command to run immediately")
+		}
+	})
+
+	t.Run("multiple profiles opens the picker, sorted, with the current one pre-selected", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		awsDir := filepath.Join(home, ".aws")
+		if err := os.MkdirAll(awsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cfgContent := "[profile latest]\nregion = us-east-1\n\n[profile dev-admin]\nregion = us-east-1\nsso_start_url = https://example.awsapps.com/start\n"
+		if err := os.WriteFile(filepath.Join(awsDir, "config"), []byte(cfgContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		orig := viper.GetString("profile")
+		t.Cleanup(func() { viper.Set("profile", orig) })
+		viper.Set("profile", "latest")
+
+		m := dashModel{progress: &startProgress{}}
+		got, cmd := m.startProfilePickOrDiscover("rds")
+		if got.mode != modeProfilePick {
+			t.Fatalf("mode = %v, want modeProfilePick", got.mode)
+		}
+		if cmd != nil {
+			t.Error("expected no command yet — waiting on the picker")
+		}
+		if got.pendingService != "rds" {
+			t.Errorf("pendingService = %q, want %q", got.pendingService, "rds")
+		}
+		if len(got.profiles) != 2 {
+			t.Fatalf("profiles = %+v, want 2", got.profiles)
+		}
+		if got.profiles[0].Name != "dev-admin" || got.profiles[1].Name != "latest" {
+			t.Errorf("profiles not sorted alphabetically: %+v", got.profiles)
+		}
+		if got.profileCursor != 1 { // "latest" sorts to index 1
+			t.Errorf("profileCursor = %d, want 1 (pre-selecting the current profile)", got.profileCursor)
+		}
+	})
 }

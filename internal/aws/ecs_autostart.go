@@ -16,6 +16,28 @@ import (
 // initialization, so we allow generous headroom.
 const DefaultStartupTimeout = 3 * time.Minute
 
+// ecsAPI is the subset of the ECS SDK client this package calls, extracted
+// so tests can inject a stub instead of hitting real AWS. *ecs.Client
+// satisfies this automatically — nothing else needs to.
+type ecsAPI interface {
+	DescribeServices(ctx context.Context, in *ecs.DescribeServicesInput, opts ...func(*ecs.Options)) (*ecs.DescribeServicesOutput, error)
+	RunTask(ctx context.Context, in *ecs.RunTaskInput, opts ...func(*ecs.Options)) (*ecs.RunTaskOutput, error)
+	DescribeTasks(ctx context.Context, in *ecs.DescribeTasksInput, opts ...func(*ecs.Options)) (*ecs.DescribeTasksOutput, error)
+	StopTask(ctx context.Context, in *ecs.StopTaskInput, opts ...func(*ecs.Options)) (*ecs.StopTaskOutput, error)
+	ListClusters(ctx context.Context, in *ecs.ListClustersInput, opts ...func(*ecs.Options)) (*ecs.ListClustersOutput, error)
+	ListServices(ctx context.Context, in *ecs.ListServicesInput, opts ...func(*ecs.Options)) (*ecs.ListServicesOutput, error)
+	ListTasks(ctx context.Context, in *ecs.ListTasksInput, opts ...func(*ecs.Options)) (*ecs.ListTasksOutput, error)
+}
+
+// ecsClient returns d's ECS client, constructing the real SDK client on
+// first use. Tests set d.ecs directly (same package) to inject a stub.
+func (d *Discovery) ecsClient() ecsAPI {
+	if d.ecs == nil {
+		d.ecs = ecs.NewFromConfig(d.cfg)
+	}
+	return d.ecs
+}
+
 // ProgressFunc receives elapsed time and a short status string during waits.
 // Used to surface "Task PROVISIONING (12s)..." style feedback in the CLI.
 type ProgressFunc func(elapsed time.Duration, status string)
@@ -28,7 +50,7 @@ type ProgressFunc func(elapsed time.Duration, status string)
 // Exec is enabled per-task here (not inherited from the service) so the agent
 // reliably starts — matching a manual `run-task --enable-execute-command`.
 func (d *Discovery) RunTaskFromService(ctx context.Context, cluster, service string) (string, error) {
-	client := ecs.NewFromConfig(d.cfg)
+	client := d.ecsClient()
 
 	desc, err := client.DescribeServices(ctx, &ecs.DescribeServicesInput{
 		Cluster:  aws.String(cluster),
@@ -83,7 +105,7 @@ func (d *Discovery) WaitForTaskReady(ctx context.Context, cluster, taskARN, serv
 	if timeout <= 0 {
 		timeout = DefaultStartupTimeout
 	}
-	client := ecs.NewFromConfig(d.cfg)
+	client := d.ecsClient()
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
 
@@ -138,7 +160,7 @@ func (d *Discovery) WaitForTaskReady(ctx context.Context, cluster, taskARN, serv
 // StopTask stops a running task (used to tear down tunnelboy-started ephemeral
 // tasks). Best-effort: callers typically log rather than fail on error.
 func (d *Discovery) StopTask(ctx context.Context, cluster, taskARN, reason string) error {
-	client := ecs.NewFromConfig(d.cfg)
+	client := d.ecsClient()
 	_, err := client.StopTask(ctx, &ecs.StopTaskInput{
 		Cluster: aws.String(cluster),
 		Task:    aws.String(taskARN),
@@ -218,7 +240,7 @@ type ServiceRef struct {
 // the supplied patterns. Used by pattern-based auto-start to figure out which
 // service to scale when no tasks are running.
 func (d *Discovery) FindECSServicesByPattern(ctx context.Context, patterns []string) ([]ServiceRef, error) {
-	client := ecs.NewFromConfig(d.cfg)
+	client := d.ecsClient()
 
 	clusters, err := client.ListClusters(ctx, &ecs.ListClustersInput{})
 	if err != nil {
@@ -286,9 +308,14 @@ func (d *Discovery) autoStartECSService(ctx context.Context, cluster, service st
 	task, err := d.WaitForTaskReady(ctx, cluster, taskARN, service, DefaultStartupTimeout, d.progress)
 	if err != nil {
 		// Best-effort cleanup of the task we just started; use a fresh context
-		// in case the caller's was cancelled.
-		_ = d.StopTask(context.Background(), cluster, taskARN, "tunnelboy: task never became ready")
-		return nil, err
+		// in case the caller's was cancelled. Folded into the returned error
+		// (rather than discarded) so callers — and anything surfacing that
+		// error, like the dashboard's failure message — say what happened to
+		// the task instead of leaving the cleanup invisible.
+		if stopErr := d.StopTask(context.Background(), cluster, taskARN, "tunnelboy: task never became ready"); stopErr != nil {
+			return nil, fmt.Errorf("%w (also failed to stop the task it started, %s: %v — stop it manually)", err, taskARN, stopErr)
+		}
+		return nil, fmt.Errorf("%w (auto-stopped the task it started, %s)", err, taskARN)
 	}
 	return task, nil
 }
