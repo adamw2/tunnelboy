@@ -52,6 +52,7 @@ const (
 	modeStarting       // spawnDetached in flight
 	modeDBUserInput    // RDS: enter the DB user to mint an IAM token for
 	modeTokenGen       // IAM token generation in flight
+	modeProfilePick    // discover: pick which AWS profile to scan with
 )
 
 // newItem is one row of the launcher: either a config preset (launched via
@@ -83,6 +84,15 @@ type dashModel struct {
 	service      string
 	targets      []dashTarget
 	targetCursor int
+
+	// profiles/profileCursor back the profile picker shown before a
+	// discover scan (presets already carry their own aws_profile from
+	// config; discover has no such per-item profile, so it needs an
+	// explicit pick). pendingService holds the service to discover once a
+	// profile's chosen.
+	profiles       []aws.ProfileInfo
+	profileCursor  int
+	pendingService string
 
 	jumpHosts  []aws.JumpHost
 	jumpCursor int
@@ -538,9 +548,7 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.progress.set("launching...")
 					return m, launchPreset(item.preset, m.progress)
 				}
-				m.mode = modeDiscovering
-				m.service = item.service
-				return m, discoverCmd(item.service)
+				return m.startProfilePickOrDiscover(item.service)
 			}
 		case "esc", "n":
 			m.mode = modeList
@@ -671,6 +679,31 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "esc", "q":
 			m.mode = modeList
+		}
+		return m, nil
+
+	case modeProfilePick:
+		switch key {
+		case "up", "k":
+			if m.profileCursor > 0 {
+				m.profileCursor--
+			}
+		case "down", "j":
+			if m.profileCursor < len(m.profiles)-1 {
+				m.profileCursor++
+			}
+		case "enter":
+			if m.profileCursor < len(m.profiles) {
+				viper.Set("profile", m.profiles[m.profileCursor].Name)
+				m.mode = modeDiscovering
+				m.service = m.pendingService
+				return m, discoverCmd(m.pendingService)
+			}
+		case "esc":
+			m.mode = modeNewPick
+		case "q":
+			m.quitting = true
+			return m, tea.Quit
 		}
 		return m, nil
 
@@ -823,6 +856,44 @@ func tokenCmd(st state.TunnelState, dbUser string) tea.Cmd {
 		}
 		return tokenDoneMsg{user: dbUser}
 	}
+}
+
+// startProfilePickOrDiscover begins the discover flow for service. A preset
+// already carries its own aws_profile from config, so it never needs this;
+// discover has no such per-item profile, so — if there's more than one AWS
+// profile configured — it prompts to pick one first. With zero or one
+// profile there's nothing to disambiguate, so it discovers immediately
+// with whatever's already the default, matching resolveJumpCmd's precedent
+// of skipping jump-host pick when there's only one candidate.
+func (m dashModel) startProfilePickOrDiscover(service string) (dashModel, tea.Cmd) {
+	profiles, err := aws.ListProfiles()
+	if err != nil || len(profiles) < 2 {
+		m.mode = modeDiscovering
+		m.service = service
+		return m, discoverCmd(service)
+	}
+	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })
+	m.profiles = profiles
+	m.pendingService = service
+	m.profileCursor = currentProfileIndex(profiles)
+	m.mode = modeProfilePick
+	return m, nil
+}
+
+// currentProfileIndex finds the dashboard's current default profile
+// (whatever --profile/AWS_PROFILE already resolved to) in the list, so the
+// picker opens with it pre-selected instead of always defaulting to the top.
+func currentProfileIndex(profiles []aws.ProfileInfo) int {
+	current := viper.GetString("profile")
+	if current == "" {
+		current = "default"
+	}
+	for i, p := range profiles {
+		if p.Name == current {
+			return i
+		}
+	}
+	return 0
 }
 
 // discoverCmd runs AWS discovery for one service type off the UI thread.
@@ -1111,6 +1182,8 @@ func (m dashModel) View() string {
 		b.WriteString("\n")
 	case modeJumpPick:
 		m.viewJumpHosts(&b)
+	case modeProfilePick:
+		m.viewProfilePick(&b)
 	case modeDBUserInput:
 		b.WriteString(tui.TitleStyle.Render("IAM TOKEN"))
 		b.WriteString("\n")
@@ -1179,6 +1252,8 @@ func (m dashModel) View() string {
 		hints = "Digits • Enter Confirm • Esc Back"
 	case modeJumpPick:
 		hints = "↑↓ Navigate • Enter Select Jump Host • Esc Cancel"
+	case modeProfilePick:
+		hints = "↑↓ Navigate • Enter Select Profile • Esc Back"
 	case modeStarting:
 		hints = "Starting..."
 	case modeDBUserInput:
@@ -1399,6 +1474,31 @@ func (m dashModel) viewJumpHosts(b *strings.Builder) {
 	for i, h := range m.jumpHosts {
 		row := fmt.Sprintf("%-30s %s  %s", truncate(h.Name, 30), strings.ToUpper(h.Type), h.PrivateIP)
 		if i == m.jumpCursor {
+			b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
+		} else {
+			b.WriteString("  " + tui.ItemStyle.Render(row))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func (m dashModel) viewProfilePick(b *strings.Builder) {
+	b.WriteString(tui.TitleStyle.Render("SELECT AWS PROFILE"))
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render(fmt.Sprintf("  which profile to discover %s with", m.pendingService)))
+	b.WriteString("\n")
+
+	for i, p := range m.profiles {
+		region := p.Region
+		if region == "" {
+			region = "-"
+		}
+		kind := "iam"
+		if p.IsSSO {
+			kind = "sso"
+		}
+		row := fmt.Sprintf("%-25s %-4s %s", truncate(p.Name, 25), kind, region)
+		if i == m.profileCursor {
 			b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
 		} else {
 			b.WriteString("  " + tui.ItemStyle.Render(row))

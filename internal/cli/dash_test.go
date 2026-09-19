@@ -4,13 +4,16 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/viper"
 
+	"github.com/adamw2/tunnelboy/internal/aws"
 	"github.com/adamw2/tunnelboy/internal/config"
 	"github.com/adamw2/tunnelboy/internal/state"
 	"github.com/adamw2/tunnelboy/internal/tunnel"
@@ -641,4 +644,88 @@ func TestStartDoneMsgNoWarningWhenTunnelIsActive(t *testing.T) {
 	if containsAction(dm.actions, "already gone") {
 		t.Errorf("actions = %v, want no false-alarm warning — the tunnel is actually active", dm.actions)
 	}
+}
+
+func TestCurrentProfileIndex(t *testing.T) {
+	orig := viper.GetString("profile")
+	t.Cleanup(func() { viper.Set("profile", orig) })
+
+	profiles := []aws.ProfileInfo{{Name: "default"}, {Name: "dev-admin"}, {Name: "latest"}}
+
+	t.Run("matches the current profile", func(t *testing.T) {
+		viper.Set("profile", "dev-admin")
+		if got := currentProfileIndex(profiles); got != 1 {
+			t.Errorf("currentProfileIndex() = %d, want 1", got)
+		}
+	})
+
+	t.Run("empty viper profile falls back to default", func(t *testing.T) {
+		viper.Set("profile", "")
+		if got := currentProfileIndex(profiles); got != 0 {
+			t.Errorf("currentProfileIndex() = %d, want 0 (default)", got)
+		}
+	})
+
+	t.Run("unknown profile falls back to index 0", func(t *testing.T) {
+		viper.Set("profile", "nonexistent")
+		if got := currentProfileIndex(profiles); got != 0 {
+			t.Errorf("currentProfileIndex() = %d, want 0", got)
+		}
+	})
+}
+
+func TestStartProfilePickOrDiscover(t *testing.T) {
+	t.Run("zero or one profile skips the picker", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir()) // no ~/.aws/config at all
+
+		m := dashModel{progress: &startProgress{}}
+		got, cmd := m.startProfilePickOrDiscover("rds")
+		if got.mode != modeDiscovering {
+			t.Errorf("mode = %v, want modeDiscovering", got.mode)
+		}
+		if got.service != "rds" {
+			t.Errorf("service = %q, want %q", got.service, "rds")
+		}
+		if cmd == nil {
+			t.Error("expected a discover command to run immediately")
+		}
+	})
+
+	t.Run("multiple profiles opens the picker, sorted, with the current one pre-selected", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		awsDir := filepath.Join(home, ".aws")
+		if err := os.MkdirAll(awsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cfgContent := "[profile latest]\nregion = us-east-1\n\n[profile dev-admin]\nregion = us-east-1\nsso_start_url = https://example.awsapps.com/start\n"
+		if err := os.WriteFile(filepath.Join(awsDir, "config"), []byte(cfgContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		orig := viper.GetString("profile")
+		t.Cleanup(func() { viper.Set("profile", orig) })
+		viper.Set("profile", "latest")
+
+		m := dashModel{progress: &startProgress{}}
+		got, cmd := m.startProfilePickOrDiscover("rds")
+		if got.mode != modeProfilePick {
+			t.Fatalf("mode = %v, want modeProfilePick", got.mode)
+		}
+		if cmd != nil {
+			t.Error("expected no command yet — waiting on the picker")
+		}
+		if got.pendingService != "rds" {
+			t.Errorf("pendingService = %q, want %q", got.pendingService, "rds")
+		}
+		if len(got.profiles) != 2 {
+			t.Fatalf("profiles = %+v, want 2", got.profiles)
+		}
+		if got.profiles[0].Name != "dev-admin" || got.profiles[1].Name != "latest" {
+			t.Errorf("profiles not sorted alphabetically: %+v", got.profiles)
+		}
+		if got.profileCursor != 1 { // "latest" sorts to index 1
+			t.Errorf("profileCursor = %d, want 1 (pre-selecting the current profile)", got.profileCursor)
+		}
+	})
 }
