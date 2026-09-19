@@ -286,9 +286,14 @@ func (d *Discovery) autoStartECSService(ctx context.Context, cluster, service st
 	task, err := d.WaitForTaskReady(ctx, cluster, taskARN, service, DefaultStartupTimeout, d.progress)
 	if err != nil {
 		// Best-effort cleanup of the task we just started; use a fresh context
-		// in case the caller's was cancelled.
-		_ = d.StopTask(context.Background(), cluster, taskARN, "tunnelboy: task never became ready")
-		return nil, err
+		// in case the caller's was cancelled. Folded into the returned error
+		// (rather than discarded) so callers — and anything surfacing that
+		// error, like the dashboard's failure message — say what happened to
+		// the task instead of leaving the cleanup invisible.
+		if stopErr := d.StopTask(context.Background(), cluster, taskARN, "tunnelboy: task never became ready"); stopErr != nil {
+			return nil, fmt.Errorf("%w (also failed to stop the task it started, %s: %v — stop it manually)", err, taskARN, stopErr)
+		}
+		return nil, fmt.Errorf("%w (auto-stopped the task it started, %s)", err, taskARN)
 	}
 	return task, nil
 }

@@ -8,13 +8,16 @@ import (
 	"strings"
 )
 
-// UnmanagedSession is a live SSM port-forwarding session — a
-// session-manager-plugin process holding a local listening port — that isn't
-// tracked in TunnelBoy's own state. Either started outside TunnelBoy (a raw
+// UnmanagedSession is a session-manager-plugin process that isn't tracked in
+// TunnelBoy's own state. Either started outside TunnelBoy (a raw
 // `aws ssm start-session`, a script, another tool) or orphaned after its
 // owning TunnelBoy process died without running cleanup.
 type UnmanagedSession struct {
-	PID       int
+	PID int
+	// LocalPort is the port it's forwarding, or 0 if the process is still
+	// alive but no longer holds any listening socket — its SSM channel
+	// already closed (e.g. an idle timeout) without the plugin process
+	// exiting, so it's forwarding nothing but still occupying a PID.
 	LocalPort int
 	// Detail is a best-effort description of the target, parsed from the
 	// parent process's command line when it's a recognizable
@@ -28,43 +31,77 @@ type UnmanagedSession struct {
 // parented by one of managedOwnerPIDs (the PIDs recorded in TunnelBoy's own
 // tunnel state — the process that started each tracked tunnel's SSM session
 // directly, so a managed session's plugin child is always its immediate
-// child). Best-effort: relies on `lsof`/`ps` being present; a missing tool or
-// restricted permissions just yields no results, never an error.
+// child). Covers both live port-forwarders and dead/orphaned ones with no
+// listening port left (see UnmanagedSession.LocalPort). Best-effort: relies
+// on `ps`/`lsof` being present; a missing tool or restricted permissions
+// just yields no results, never an error.
 func DiscoverUnmanagedSessions(managedOwnerPIDs map[int]bool) []UnmanagedSession {
+	pids, err := sessionManagerPluginPIDs()
+	if err != nil {
+		return nil
+	}
+	ports := listeningPortsByPID()
+
+	var sessions []UnmanagedSession
+	for pid := range pids {
+		ppid, ok := parentPID(pid)
+		if ok && managedOwnerPIDs[ppid] {
+			continue // this plugin process belongs to a tracked tunnel
+		}
+		sessions = append(sessions, UnmanagedSession{
+			PID:       pid,
+			LocalPort: ports[pid], // 0 if it holds no listening socket
+			Detail:    describeSSMParent(ppid, ok),
+		})
+	}
+	return sessions
+}
+
+// sessionManagerPluginPIDs lists every session-manager-plugin process's PID
+// via `ps`, rather than via a listening-socket scan, so dead sessions (SSM
+// channel already closed, no port left) are found too.
+func sessionManagerPluginPIDs() (map[int]bool, error) {
+	out, err := exec.Command("ps", "-axo", "pid=,comm=").Output() // #nosec G204 -- fixed binary and args
+	if err != nil {
+		return nil, err
+	}
+	pids := map[int]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[1] != "session-manager-plugin" {
+			continue
+		}
+		if pid, err := strconv.Atoi(fields[0]); err == nil {
+			pids[pid] = true
+		}
+	}
+	return pids, nil
+}
+
+// listeningPortsByPID maps each session-manager-plugin PID currently holding
+// a local listening TCP port to that port. Best-effort: a missing `lsof` or
+// no matches just yields an empty map, never an error — callers treat an
+// absent entry as "holds no port".
+func listeningPortsByPID() map[int]int {
 	out, err := exec.Command("lsof", "-nP", "-iTCP", "-sTCP:LISTEN").Output() // #nosec G204 -- fixed binary and args
 	if err != nil {
 		return nil
 	}
-
-	var sessions []UnmanagedSession
-	seen := map[int]bool{}
+	ports := map[int]int{}
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 || !strings.HasPrefix(fields[0], "session-m") {
 			continue // not a session-manager-plugin row ("session-m..." — lsof truncates COMMAND)
 		}
 		pid, err := strconv.Atoi(fields[1])
-		if err != nil || seen[pid] {
+		if err != nil {
 			continue
 		}
-		seen[pid] = true
-
-		ppid, ok := parentPID(pid)
-		if ok && managedOwnerPIDs[ppid] {
-			continue // this plugin process belongs to a tracked tunnel
+		if port := portFromAddress(fields[len(fields)-2]); port != 0 {
+			ports[pid] = port
 		}
-
-		port := portFromAddress(fields[len(fields)-2])
-		if port == 0 {
-			continue
-		}
-		sessions = append(sessions, UnmanagedSession{
-			PID:       pid,
-			LocalPort: port,
-			Detail:    describeSSMParent(ppid, ok),
-		})
 	}
-	return sessions
+	return ports
 }
 
 // parentPID returns pid's parent PID via `ps`, or ok=false if it couldn't be
