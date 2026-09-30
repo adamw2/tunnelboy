@@ -52,6 +52,7 @@ const (
 	modeStarting       // spawnDetached in flight
 	modeDBUserInput    // RDS: enter the DB user to mint an IAM token for
 	modeTokenGen       // IAM token generation in flight
+	modeProfilePick    // discover: pick which AWS profile to scan with
 )
 
 // newItem is one row of the launcher: either a config preset (launched via
@@ -84,6 +85,15 @@ type dashModel struct {
 	targets      []dashTarget
 	targetCursor int
 
+	// profiles/profileCursor back the profile picker shown before a
+	// discover scan (presets already carry their own aws_profile from
+	// config; discover has no such per-item profile, so it needs an
+	// explicit pick). pendingService holds the service to discover once a
+	// profile's chosen.
+	profiles       []aws.ProfileInfo
+	profileCursor  int
+	pendingService string
+
 	jumpHosts  []aws.JumpHost
 	jumpCursor int
 
@@ -100,10 +110,24 @@ type dashModel struct {
 	mode      dashMode
 	launching string
 	message   string
+	actions   []string // most recent first; both user-initiated and auto-detected
 	logLines  []string
 	width     int
 	height    int
 	quitting  bool
+
+	// failureLabel/failureLog hold the log tail for the most recent failed
+	// or vanished launch — the thing that explains an ACTIONS entry like
+	// "X reported started, but no tunnel is active now". Cleared only by a
+	// newer one replacing it; there's deliberately no "success" that clears
+	// it, since it's meant to stay visible until the user's moved past it.
+	failureLabel string
+	failureLog   []string
+
+	// pendingRemovals holds tunnel IDs whose disappearance is already
+	// explained by an in-flight [d] disconnect/kill, so reload doesn't also
+	// log it as an unexpected vanish.
+	pendingRemovals map[string]bool
 
 	// progress is shared with in-flight launch goroutines; the 1Hz tick
 	// re-renders whatever they last reported (ECS auto-start phase, etc.).
@@ -254,6 +278,40 @@ func presetIdentifier(c config.Connection) string {
 	return ""
 }
 
+const dashActionHistory = 5
+
+// recordAction logs an action (user-initiated or auto-detected) to the
+// ACTIONS panel and as the current status message.
+func (m *dashModel) recordAction(s string) {
+	m.message = s
+	m.actions = append([]string{s}, m.actions...)
+	if len(m.actions) > dashActionHistory {
+		m.actions = m.actions[:dashActionHistory]
+	}
+}
+
+// setFailureLogFromFile populates the LOGS panel from a tunnel's log file on
+// disk — used when we have a real per-tunnel log (the runner got far enough
+// to create one).
+func (m *dashModel) setFailureLogFromFile(label, path string) {
+	m.failureLabel = label
+	if path == "" {
+		m.failureLog = []string{"(no log file was ever created for this tunnel)"}
+		return
+	}
+	m.failureLog = tailLines(path, dashLogLines)
+}
+
+// setFailureLogFromOutput populates the LOGS panel from captured subprocess
+// output — used for a preset launch (internal/cli/dash.go's launchPreset),
+// where the failure can happen before any per-tunnel log file exists (e.g.
+// during AWS profile/SSO hand-off), so the child process's own stdout+stderr
+// is the only diagnostic we have.
+func (m *dashModel) setFailureLogFromOutput(label, output string) {
+	m.failureLabel = label
+	m.failureLog = tailLinesFromString(output, dashLogLines)
+}
+
 func (m *dashModel) reload() {
 	tunnels, err := state.List()
 	if err != nil {
@@ -261,6 +319,26 @@ func (m *dashModel) reload() {
 		return
 	}
 	sort.Slice(tunnels, func(i, j int) bool { return tunnels[i].ID < tunnels[j].ID })
+
+	// A tunnel present a moment ago but now gone, without us having asked to
+	// remove it, means its process died on its own — surface that instead of
+	// letting it disappear silently.
+	stillPresent := make(map[string]bool, len(tunnels))
+	for _, t := range tunnels {
+		stillPresent[t.ID] = true
+	}
+	for _, prev := range m.tunnels {
+		if stillPresent[prev.ID] {
+			continue
+		}
+		if m.pendingRemovals[prev.ID] {
+			delete(m.pendingRemovals, prev.ID)
+			continue
+		}
+		m.recordAction(fmt.Sprintf("⚠ %s vanished (process no longer running) — see LOGS below", prev.ID))
+		m.setFailureLogFromFile(prev.ID, prev.LogFile)
+	}
+
 	m.tunnels = tunnels
 
 	managedOwners := make(map[int]bool, len(tunnels))
@@ -268,7 +346,14 @@ func (m *dashModel) reload() {
 		managedOwners[t.PID] = true
 	}
 	m.unmanaged = tunnel.DiscoverUnmanagedSessions(managedOwners)
-	sort.Slice(m.unmanaged, func(i, j int) bool { return m.unmanaged[i].LocalPort < m.unmanaged[j].LocalPort })
+	// Live port-holders first (by port), dead/portless ones after.
+	sort.Slice(m.unmanaged, func(i, j int) bool {
+		a, b := m.unmanaged[i], m.unmanaged[j]
+		if (a.LocalPort == 0) != (b.LocalPort == 0) {
+			return a.LocalPort != 0
+		}
+		return a.LocalPort < b.LocalPort
+	})
 
 	total := len(m.tunnels) + len(m.unmanaged)
 	if m.cursor >= total {
@@ -318,11 +403,11 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stopDoneMsg:
 		switch msg.result {
 		case stopKilled:
-			m.message = fmt.Sprintf("⚠ %s force-killed (close hooks may not have run)", msg.id)
+			m.recordAction(fmt.Sprintf("⚠ %s force-killed (close hooks may not have run)", msg.id))
 		case stopStale:
-			m.message = fmt.Sprintf("⚠ %s was already dead, record removed", msg.id)
+			m.recordAction(fmt.Sprintf("⚠ %s was already dead, record removed", msg.id))
 		default:
-			m.message = fmt.Sprintf("✓ %s closed", msg.id)
+			m.recordAction(fmt.Sprintf("✓ %s closed", msg.id))
 		}
 		m.reload()
 		return m, nil
@@ -330,16 +415,27 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case launchDoneMsg:
 		m.mode = modeList
 		m.launching = ""
+		beforeCount := len(m.tunnels)
+		succeeded := msg.err == nil
 		if msg.err != nil {
 			tail := msg.output
 			if lines := strings.Split(strings.TrimSpace(tail), "\n"); len(lines) > 3 {
 				tail = strings.Join(lines[len(lines)-3:], " / ")
 			}
-			m.message = fmt.Sprintf("✗ %s failed: %s", msg.name, tail)
+			m.recordAction(fmt.Sprintf("✗ %s failed: %s", msg.name, tail))
+			m.setFailureLogFromOutput(msg.name, msg.output)
 		} else {
-			m.message = fmt.Sprintf("✓ started %s", msg.name)
+			m.recordAction(fmt.Sprintf("✓ started %s", msg.name))
 		}
 		m.reload()
+		// A "started" report only means the detached runner was alive at the
+		// instant it wrote its state file — it can die moments later, before
+		// this very reload. If the active count didn't actually grow, don't
+		// leave "✓ started" as the last word on it.
+		if succeeded && len(m.tunnels) <= beforeCount {
+			m.recordAction(fmt.Sprintf("⚠ %s reported started, but no tunnel is active now — see LOGS below", msg.name))
+			m.setFailureLogFromOutput(msg.name, msg.output)
+		}
 		return m, nil
 
 	case discoverDoneMsg:
@@ -348,12 +444,12 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.mode = modeNewPick
-			m.message = fmt.Sprintf("✗ discovery failed: %v", msg.err)
+			m.recordAction(fmt.Sprintf("✗ discovery failed: %v", msg.err))
 			return m, nil
 		}
 		if len(msg.targets) == 0 {
 			m.mode = modeNewPick
-			m.message = fmt.Sprintf("no %s targets found", msg.service)
+			m.recordAction(fmt.Sprintf("no %s targets found", msg.service))
 			return m, nil
 		}
 		m.service = msg.service
@@ -371,20 +467,25 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case startDoneMsg:
 		m.mode = modeList
+		succeeded := msg.err == nil
 		if msg.err != nil {
-			m.message = fmt.Sprintf("✗ start failed: %v", msg.err)
+			m.recordAction(fmt.Sprintf("✗ start failed: %v", msg.err))
 		} else {
-			m.message = fmt.Sprintf("✓ %s running on localhost:%d", msg.st.ID, msg.st.LocalPort)
+			m.recordAction(fmt.Sprintf("✓ %s running on localhost:%d", msg.st.ID, msg.st.LocalPort))
 		}
 		m.reload()
+		if succeeded && !m.hasTunnel(msg.st.ID) {
+			m.recordAction(fmt.Sprintf("⚠ %s reported started, but is already gone — see LOGS below", msg.st.ID))
+			m.setFailureLogFromFile(msg.st.ID, msg.st.LogFile)
+		}
 		return m, nil
 
 	case tokenDoneMsg:
 		m.mode = modeList
 		if msg.err != nil {
-			m.message = fmt.Sprintf("✗ IAM token failed: %v", msg.err)
+			m.recordAction(fmt.Sprintf("✗ IAM token failed: %v", msg.err))
 		} else {
-			m.message = fmt.Sprintf("✓ IAM token for %s copied to clipboard (valid 15 min)", msg.user)
+			m.recordAction(fmt.Sprintf("✓ IAM token for %s copied to clipboard (valid 15 min)", msg.user))
 		}
 		return m, nil
 
@@ -410,12 +511,16 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch {
 			case m.cursor < len(m.tunnels):
 				t := m.tunnels[m.cursor]
-				m.message = fmt.Sprintf("► closing %s...", t.ID)
+				if m.pendingRemovals == nil {
+					m.pendingRemovals = map[string]bool{}
+				}
+				m.pendingRemovals[t.ID] = true
+				m.recordAction(fmt.Sprintf("► closing %s...", t.ID))
 				return m, func() tea.Msg { return stopDoneMsg{t.ID, stopTunnelProcess(&t)} }
 			case m.cursor < len(m.tunnels)+len(m.unmanaged):
 				u := m.unmanaged[m.cursor-len(m.tunnels)]
-				label := fmt.Sprintf("pid %d (:%d)", u.PID, u.LocalPort)
-				m.message = fmt.Sprintf("► killing %s...", label)
+				label := unmanagedKillLabel(u)
+				m.recordAction(fmt.Sprintf("► killing %s...", label))
 				return m, func() tea.Msg { return stopDoneMsg{label, killUnmanagedSession(u.PID)} }
 			}
 		default:
@@ -443,9 +548,7 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.progress.set("launching...")
 					return m, launchPreset(item.preset, m.progress)
 				}
-				m.mode = modeDiscovering
-				m.service = item.service
-				return m, discoverCmd(item.service)
+				return m.startProfilePickOrDiscover(item.service)
 			}
 		case "esc", "n":
 			m.mode = modeList
@@ -579,6 +682,31 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case modeProfilePick:
+		switch key {
+		case "up", "k":
+			if m.profileCursor > 0 {
+				m.profileCursor--
+			}
+		case "down", "j":
+			if m.profileCursor < len(m.profiles)-1 {
+				m.profileCursor++
+			}
+		case "enter":
+			if m.profileCursor < len(m.profiles) {
+				viper.Set("profile", m.profiles[m.profileCursor].Name)
+				m.mode = modeDiscovering
+				m.service = m.pendingService
+				return m, discoverCmd(m.pendingService)
+			}
+		case "esc":
+			m.mode = modeNewPick
+		case "q":
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
+
 	case modeDBUserInput:
 		switch {
 		case key == "enter":
@@ -632,16 +760,16 @@ func (m dashModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.tunnels) {
 				url := connectionString(m.tunnels[m.cursor])
 				if err := clipboard.WriteAll(url); err != nil {
-					m.message = "✗ clipboard: " + err.Error()
+					m.recordAction("✗ clipboard: " + err.Error())
 				} else {
-					m.message = "✓ copied " + url
+					m.recordAction("✓ copied " + url)
 				}
 			}
 		case "t":
 			if m.cursor < len(m.tunnels) {
 				t := m.tunnels[m.cursor]
 				if t.Type != string(tunnel.TunnelTypeRDS) {
-					m.message = "IAM tokens apply to RDS tunnels only"
+					m.recordAction("IAM tokens apply to RDS tunnels only")
 					return m, nil
 				}
 				m.tokenTunnel = t
@@ -728,6 +856,44 @@ func tokenCmd(st state.TunnelState, dbUser string) tea.Cmd {
 		}
 		return tokenDoneMsg{user: dbUser}
 	}
+}
+
+// startProfilePickOrDiscover begins the discover flow for service. A preset
+// already carries its own aws_profile from config, so it never needs this;
+// discover has no such per-item profile, so — if there's more than one AWS
+// profile configured — it prompts to pick one first. With zero or one
+// profile there's nothing to disambiguate, so it discovers immediately
+// with whatever's already the default, matching resolveJumpCmd's precedent
+// of skipping jump-host pick when there's only one candidate.
+func (m dashModel) startProfilePickOrDiscover(service string) (dashModel, tea.Cmd) {
+	profiles, err := aws.ListProfiles()
+	if err != nil || len(profiles) < 2 {
+		m.mode = modeDiscovering
+		m.service = service
+		return m, discoverCmd(service)
+	}
+	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })
+	m.profiles = profiles
+	m.pendingService = service
+	m.profileCursor = currentProfileIndex(profiles)
+	m.mode = modeProfilePick
+	return m, nil
+}
+
+// currentProfileIndex finds the dashboard's current default profile
+// (whatever --profile/AWS_PROFILE already resolved to) in the list, so the
+// picker opens with it pre-selected instead of always defaulting to the top.
+func currentProfileIndex(profiles []aws.ProfileInfo) int {
+	current := viper.GetString("profile")
+	if current == "" {
+		current = "default"
+	}
+	for i, p := range profiles {
+		if p.Name == current {
+			return i
+		}
+	}
+	return 0
 }
 
 // discoverCmd runs AWS discovery for one service type off the UI thread.
@@ -933,7 +1099,14 @@ func tailLines(path string, n int) []string {
 	if err != nil {
 		return []string{"(no log)"}
 	}
-	all := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	return tailLinesFromString(string(data), n)
+}
+
+// tailLinesFromString applies tailLines' same blank-line-dropping/tail-n
+// logic directly to an in-memory string (e.g. captured subprocess output)
+// rather than a file on disk.
+func tailLinesFromString(s string, n int) []string {
+	all := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	var lines []string
 	for _, l := range all {
 		if strings.TrimSpace(l) != "" {
@@ -942,6 +1115,9 @@ func tailLines(path string, n int) []string {
 	}
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
+	}
+	if len(lines) == 0 {
+		return []string{"(no output captured)"}
 	}
 	return lines
 }
@@ -1006,13 +1182,15 @@ func (m dashModel) View() string {
 		b.WriteString("\n")
 	case modeJumpPick:
 		m.viewJumpHosts(&b)
+	case modeProfilePick:
+		m.viewProfilePick(&b)
 	case modeDBUserInput:
 		b.WriteString(tui.TitleStyle.Render("IAM TOKEN"))
 		b.WriteString("\n")
 		b.WriteString(tui.TextStyle.Render(fmt.Sprintf("  Database user for %s: %s_",
 			m.tokenTunnel.Target, m.dbUserBuf)))
 		b.WriteString("\n")
-		b.WriteString(tui.DimStyle.Render("  The token is copied to your clipboard — use it as the password."))
+		b.WriteString(tui.DimStyle.Render("  The token will be copied to your clipboard — use it as the password."))
 		b.WriteString("\n")
 	case modeTokenGen:
 		b.WriteString(tui.TitleStyle.Render("IAM TOKEN"))
@@ -1044,7 +1222,9 @@ func (m dashModel) View() string {
 		m.viewTunnels(&b)
 	}
 
-	if m.message != "" {
+	// modeList/modeConfirm render via viewTunnels, which has its own ACTIONS
+	// section covering m.message — showing it again here would duplicate it.
+	if m.message != "" && m.mode != modeList && m.mode != modeConfirm {
 		b.WriteString("\n")
 		b.WriteString(tui.WarningStyle.Render(m.message))
 		b.WriteString("\n")
@@ -1072,6 +1252,8 @@ func (m dashModel) View() string {
 		hints = "Digits • Enter Confirm • Esc Back"
 	case modeJumpPick:
 		hints = "↑↓ Navigate • Enter Select Jump Host • Esc Cancel"
+	case modeProfilePick:
+		hints = "↑↓ Navigate • Enter Select Profile • Esc Back"
 	case modeStarting:
 		hints = "Starting..."
 	case modeDBUserInput:
@@ -1093,6 +1275,15 @@ func (m dashModel) selectedID() string {
 	return "?"
 }
 
+func (m dashModel) hasTunnel(id string) bool {
+	for _, t := range m.tunnels {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // confirmLabel names what [d] is about to act on, for the confirm prompt.
 func (m dashModel) confirmLabel() string {
 	if m.cursor < len(m.tunnels) {
@@ -1100,9 +1291,21 @@ func (m dashModel) confirmLabel() string {
 	}
 	if i := m.cursor - len(m.tunnels); i < len(m.unmanaged) {
 		u := m.unmanaged[i]
+		if u.LocalPort == 0 {
+			return fmt.Sprintf("dead session (pid %d)", u.PID)
+		}
 		return fmt.Sprintf("unmanaged session on :%d (pid %d)", u.LocalPort, u.PID)
 	}
 	return "?"
+}
+
+// unmanagedKillLabel names an unmanaged session for the "► killing..."
+// status line and the resulting stopDoneMsg id.
+func unmanagedKillLabel(u tunnel.UnmanagedSession) string {
+	if u.LocalPort == 0 {
+		return fmt.Sprintf("pid %d (dead, no port)", u.PID)
+	}
+	return fmt.Sprintf("pid %d (:%d)", u.PID, u.LocalPort)
 }
 
 // pendingTargetLabel names what's being started in the discovery flow.
@@ -1151,7 +1354,7 @@ func (m dashModel) viewTunnels(b *strings.Builder) {
 		b.WriteString("\n")
 		b.WriteString(tui.TitleStyle.Render("UNMANAGED TUNNELS"))
 		b.WriteString("\n")
-		b.WriteString(tui.DimStyle.Render("  session-manager-plugin sessions TunnelBoy didn't start — [d] to kill"))
+		b.WriteString(tui.DimStyle.Render("  session-manager-plugin sessions TunnelBoy didn't start, incl. dead ones with no port — [d] to kill"))
 		b.WriteString("\n")
 
 		header := fmt.Sprintf("  %-8s %-8s %s", "PID", "PORT", "DETAIL")
@@ -1163,13 +1366,43 @@ func (m dashModel) viewTunnels(b *strings.Builder) {
 			if detail == "" {
 				detail = "(unknown target)"
 			}
-			row := fmt.Sprintf("%-8d %-8d %s", u.PID, u.LocalPort, truncate(detail, 60))
+			portCol := "-"
+			if u.LocalPort != 0 {
+				portCol = strconv.Itoa(u.LocalPort)
+			} else {
+				detail += " [dead: no active port]"
+			}
+			row := fmt.Sprintf("%-8d %-8s %s", u.PID, portCol, truncate(detail, 60))
 			idx := len(m.tunnels) + i
 			if idx == m.cursor {
 				b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
 			} else {
 				b.WriteString("  " + tui.ItemStyle.Render(row))
 			}
+			b.WriteString("\n")
+		}
+	}
+
+	if len(m.actions) > 0 {
+		b.WriteString("\n")
+		b.WriteString(tui.TitleStyle.Render("ACTIONS"))
+		b.WriteString("\n")
+		for i, a := range m.actions {
+			style := tui.DimStyle
+			if i == 0 {
+				style = tui.WarningStyle
+			}
+			b.WriteString(style.Render("  " + truncate(a, 100)))
+			b.WriteString("\n")
+		}
+	}
+
+	if len(m.failureLog) > 0 {
+		b.WriteString("\n")
+		b.WriteString(tui.TitleStyle.Render(fmt.Sprintf("LOGS: %s", m.failureLabel)))
+		b.WriteString("\n")
+		for _, l := range m.failureLog {
+			b.WriteString(tui.DimStyle.Render("  " + truncate(l, 100)))
 			b.WriteString("\n")
 		}
 	}
@@ -1241,6 +1474,31 @@ func (m dashModel) viewJumpHosts(b *strings.Builder) {
 	for i, h := range m.jumpHosts {
 		row := fmt.Sprintf("%-30s %s  %s", truncate(h.Name, 30), strings.ToUpper(h.Type), h.PrivateIP)
 		if i == m.jumpCursor {
+			b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
+		} else {
+			b.WriteString("  " + tui.ItemStyle.Render(row))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func (m dashModel) viewProfilePick(b *strings.Builder) {
+	b.WriteString(tui.TitleStyle.Render("SELECT AWS PROFILE"))
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render(fmt.Sprintf("  which profile to discover %s with", m.pendingService)))
+	b.WriteString("\n")
+
+	for i, p := range m.profiles {
+		region := p.Region
+		if region == "" {
+			region = "-"
+		}
+		kind := "iam"
+		if p.IsSSO {
+			kind = "sso"
+		}
+		row := fmt.Sprintf("%-25s %-4s %s", truncate(p.Name, 25), kind, region)
+		if i == m.profileCursor {
 			b.WriteString(tui.TextStyle.Render("> ") + tui.SelectedStyle.Render(row))
 		} else {
 			b.WriteString("  " + tui.ItemStyle.Render(row))

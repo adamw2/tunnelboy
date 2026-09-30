@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -131,6 +132,13 @@ func ListProfiles() ([]ProfileInfo, error) {
 		for _, section := range cfg.Sections() {
 			name := section.Name()
 			if name == "DEFAULT" {
+				continue
+			}
+			// [sso-session foo] defines a shared SSO session that profiles
+			// reference via `sso_session = foo` — it's not itself something
+			// you can pass to --profile/AWS_PROFILE, so skip it rather than
+			// listing it as a fake, unusable profile.
+			if strings.HasPrefix(name, "sso-session ") {
 				continue
 			}
 

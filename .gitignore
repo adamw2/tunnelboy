@@ -46,3 +46,7 @@ checksums.txt
 # Go workspace
 go.work
 go.work.sum
+
+# Python (screenshot skill's ansi2png.py)
+__pycache__/
+*.pyc
