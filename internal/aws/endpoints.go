@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
+	ectypes "github.com/aws/aws-sdk-go-v2/service/elasticache/types"
 	"github.com/aws/aws-sdk-go-v2/service/kafka"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 )
@@ -24,8 +25,9 @@ type EndpointTarget struct {
 	Detail   string // human-readable extra info for display
 }
 
-// DiscoverElastiCache discovers ElastiCache replication groups and standalone
-// cache clusters (memcached, or redis clusters outside a replication group).
+// DiscoverElastiCache discovers ElastiCache replication groups, standalone
+// cache clusters (memcached, or redis clusters outside a replication group)
+// and serverless caches.
 func (d *Discovery) DiscoverElastiCache(ctx context.Context) ([]EndpointTarget, error) {
 	client := elasticache.NewFromConfig(d.cfg)
 	var targets []EndpointTarget
@@ -92,7 +94,46 @@ func (d *Discovery) DiscoverElastiCache(ctx context.Context) ([]EndpointTarget, 
 		}
 	}
 
+	scResult, err := client.DescribeServerlessCaches(ctx, &elasticache.DescribeServerlessCachesInput{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe ElastiCache serverless caches: %w", err)
+	}
+	targets = append(targets, serverlessCacheTargets(scResult.ServerlessCaches)...)
+
 	return targets, nil
+}
+
+// serverlessCacheTargets maps serverless caches to tunnel targets: one for the
+// endpoint (read/write) and one for the reader endpoint, which serverless
+// serves on the same hostname at a different port.
+func serverlessCacheTargets(caches []ectypes.ServerlessCache) []EndpointTarget {
+	var targets []EndpointTarget
+	for _, sc := range caches {
+		name := aws.ToString(sc.ServerlessCacheName)
+		engine := aws.ToString(sc.Engine)
+		detail := fmt.Sprintf("%s %s  serverless  %s", engine, aws.ToString(sc.FullEngineVersion), aws.ToString(sc.Status))
+		if sc.Endpoint != nil && aws.ToString(sc.Endpoint.Address) != "" {
+			targets = append(targets, EndpointTarget{
+				Kind:     "elasticache",
+				Name:     name,
+				Endpoint: aws.ToString(sc.Endpoint.Address),
+				Port:     aws.ToInt32(sc.Endpoint.Port),
+				Engine:   engine,
+				Detail:   detail,
+			})
+		}
+		if sc.ReaderEndpoint != nil && aws.ToString(sc.ReaderEndpoint.Address) != "" {
+			targets = append(targets, EndpointTarget{
+				Kind:     "elasticache",
+				Name:     name + "-reader",
+				Endpoint: aws.ToString(sc.ReaderEndpoint.Address),
+				Port:     aws.ToInt32(sc.ReaderEndpoint.Port),
+				Engine:   engine,
+				Detail:   detail + "  reader",
+			})
+		}
+	}
+	return targets
 }
 
 // DiscoverDocDBClusters discovers DocumentDB clusters. DocumentDB shares the
